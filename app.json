@@ -1,0 +1,16 @@
+{
+  "expo": {
+    "name": "Preventive Maintenance Scheduler",
+    "slug": "preventive-maintenance-scheduler",
+    "version": "1.0.0",
+    "orientation": "default",
+    "userInterfaceStyle": "light",
+    "web": {
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-asset",
+      "expo-font"
+    ]
+  }
+}

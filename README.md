@@ -162,3 +162,110 @@ Scan the displayed QR code with the **Expo Go (SDK 58)** app on your mobile devi
 - ✅ **Dynamic schedule calculation**: Due dates expanded dynamically with `src/utils/schedule.js` supporting `d`, `w`, `M`, `Q`, `SA`.
 - ✅ **Responsive**: Desktop sidebar on wide screens, ergonomic bottom tab bar on mobile.
 
+---
+
+## Local Testing of Email Confirmation
+
+When testing worker sign-up and email confirmation locally, configure your Supabase Dashboard as follows:
+
+### 1. Supabase Dashboard URL Configuration
+Navigate to **Authentication -> URL Configuration**:
+- **Site URL**: `http://localhost:8081`
+- **Redirect URLs**:
+  - `http://localhost:8081/**`
+  - `solarpm://**`
+  - `exp://**`
+
+### 2. Testing Modes (Confirmation ON vs OFF)
+- **Confirm email = ON** (Production & Real Verification Test):
+  - In Supabase: **Authentication -> Providers -> Email -> Confirm email: ON**.
+  - Worker signs up in mobile app / web -> A "Check your email" screen is displayed with instructions, a 60s cooldown resend button, and a back-to-login button.
+  - Clicking the email verification link redirects to `/auth/confirmed` on web or deep links to `solarpm://auth/confirmed` on mobile (or `exp://.../--/auth/confirmed` in Expo Go).
+  - The confirmation screen verifies the token, displays "Email confirmed!", signs out any temporary session, and lets the user log in cleanly.
+- **Confirm email = OFF** (Fastest Local Development):
+  - In Supabase: **Authentication -> Providers -> Email -> Confirm email: OFF**.
+  - A mobile device cannot open `localhost` email links without a tunnel/proxy. Turning confirmation OFF causes `signUp` to return an active session immediately, directing the worker straight into their task dashboard without requiring email clicks.
+- **Rate Limit Caution**: Supabase's built-in email service limits outgoing emails to ~3–4 per hour on free accounts. If testing repeatedly, use different test emails or turn "Confirm email" OFF to avoid email throttling.
+
+---
+
+## Local Testing for Supabase Auth Emails (Password Reset & Confirmation)
+
+When testing password reset and signup confirmation emails locally with physical devices (phones on Expo Go or mobile browsers):
+
+### 1. Supabase Dashboard URL Configuration
+Go to **Supabase Dashboard -> Authentication -> URL Configuration**:
+- **Site URL**: `http://localhost:8081`
+- **Redirect URLs** (add each of these patterns):
+  - `http://localhost:8081/**`
+  - `http://192.168.*.*:8081/**` (matches your local Wi-Fi IP address)
+  - `exp://**` (for Expo Go deep links)
+  - `solarpm://**` (for standalone app builds)
+
+### 2. Physical Phone Access & Wi-Fi
+- Ensure your mobile phone and your dev computer are connected to the **same local Wi-Fi network**.
+- Ensure your computer firewall allows incoming connections on port `8081` (Metro bundler).
+- When you click "Send Reset Link" on mobile or web, `getAuthRedirectUrl` computes the LAN IP (e.g. `http://192.168.1.50:8081/auth/reset-password`). Opening this email on your phone connects directly to your local computer's Expo server instead of failing on "localhost refused to connect".
+
+### 3. Immediate Testing Without Email (Direct Dashboard Override)
+If you hit Supabase default SMTP email rate limits (~3 emails/hour on free tier):
+1. **Via Dashboard**: Go to **Authentication -> Users** -> Click the three dots (`...`) next to the user -> Select **Auto-confirm** or **Change password**.
+2. **Via SQL**: Run in **SQL Editor**:
+   ```sql
+   UPDATE auth.users
+   SET encrypted_password = crypt('YourNewPassword123!', gen_salt('bf'))
+   WHERE email = 'worker@solarpm.com';
+   ```
+
+---
+
+## Why Password Reset Emails May Not Arrive
+
+If password reset emails do not arrive when clicking "Send Reset Link":
+
+1. **Supabase URL Configuration**:
+   - In **Authentication -> URL Configuration**, ensure `http://localhost:8081` is set as **Site URL** and `http://localhost:8081/**`, `solarpm://**`, and `exp://**` are present in **Redirect URLs**.
+2. **Built-in Rate Limits & Whitelist**:
+   - Supabase's default SMTP provider allows only ~3–4 emails per hour across all project users.
+   - For free tier projects, Supabase may restrict email delivery strictly to members of your Supabase organization. Check **Logs -> Auth** in the dashboard for `over_email_send_rate_limit` or delivery errors.
+3. **Custom SMTP Setup (Recommended for Full Testing)**:
+   - To send to any email address without restrictions, configure a custom SMTP provider in **Authentication -> Emails -> SMTP Settings**:
+     - **Sender Email**: Your verified sender (e.g. `support@yourdomain.com` or your Gmail address)
+     - **Sender Name**: `Solar PM Hub`
+     - **Host**: e.g. `smtp.resend.com` (Resend), `smtp-relay.brevo.com` (Brevo), or `smtp.gmail.com` (Gmail)
+     - **Port**: `587` (TLS) or `465` (SSL)
+     - **Username**: Your SMTP username / email
+     - **Password**: Your SMTP API key or Gmail App Password (never your main Gmail password)
+4. **Email Templates**:
+   - Verify that **Authentication -> Email Templates -> Reset Password** contains the confirmation tag `{{ .ConfirmationURL }}`.
+   - Check the recipient's **Spam / Junk** folder.
+5. **Local Manual Password Reset**:
+   - While testing locally, you can also update any user's password directly from the Supabase Dashboard: go to **Authentication -> Users**, click the three dots (`...`) next to the user, and select **Send password recovery** or **Auto-confirm / Change password**.
+
+---
+
+## Scaling Notes & Safe Concurrent Data Access
+
+The architecture is hardened for concurrent multi-user environments (multiple admins scheduling while field workers submit task logs):
+
+### 1. Unified Query Caching with `@tanstack/react-query`
+- **Schedule and dynamic logs** use `staleTime: 30s` with immediate garbage collection retention `gcTime: 10m` and exponential backoff retry (`retry: 3`).
+- **Static reference data** (`categories`, `groups`, `equipment`) uses `staleTime: 10m` to prevent redundant network requests.
+- **Request de-duplication**: Identical parallel requests across multiple components or screens are merged into a single network call.
+- **Window focus refetching**: Enabled on web so active browser tabs re-synchronize when focused.
+- **Date-range filtering**: Queries request only the active visible work week or month range (`gte` and `lte` on `due_date`), avoiding bulk full-table downloads.
+- **Joined Selects**: Equipment, groups, and categories are loaded in a single joined select (`equipment(*, group:groups(*, category:categories(*)))`) to eliminate N+1 queries.
+
+### 2. Concurrency Safety & Mutation Guards
+- **Atomic Upsert**: Task completions use `upsert` with `onConflict: 'rule_id,due_date'`. If another worker completes the same task concurrently, PostgreSQL constraint `23505` is caught gracefully with a friendly notification (`"Already completed by someone else"`).
+- **Optimistic Updates**: Worker completions update the UI immediately with automatic rollback if the network fails.
+- **Double-Submit Prevention**: Mutation state flags (`isPending`) disable submit buttons on Set Schedule and Task Modals.
+- **Supabase Realtime**: Live Postgres changes on `task_logs` invalidate React Query caches across all connected sessions without aggressive background polling timers.
+
+### 3. Staying within Supabase Free Tier Limits
+- **Connection pooling**: Always connect your server or external functions via Supabase connection pooler (`port 6543`, transaction mode with Supavisor) rather than direct `port 5432`.
+- **Egress & API limits**: The client limits pagination ranges using `.range(0, 999)` for large datasets and projects only required columns.
+- **Realtime connections**: Keep realtime subscriptions focused on specific channel names and ensure channels are unsubscribed on unmount via `supabase.removeChannel(channel)`.
+- **Dashboard monitoring**: Periodically monitor database RAM/CPU, egress bandwidth, and Realtime concurrent connections in the Supabase Dashboard under **Project Settings > Usage**.
+
+

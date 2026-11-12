@@ -7,9 +7,15 @@ import {
   StyleSheet,
   RefreshControl,
   Platform,
+  StatusBar as RNStatusBar,
+  useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { supabase, isConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { useConnectionStatus } from '../../context/ConnectionStatusContext';
 import {
   fetchScheduleRules,
   fetchTaskLogs,
@@ -36,6 +42,10 @@ import { colors, layout } from '../../theme';
 
 export default function TodayScreen({ navigation, route }) {
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
+  const { width } = useWindowDimensions();
+  const { status: connStatus, lastCheckedTime } = useConnectionStatus();
+  const queryClient = useQueryClient();
 
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
   const [selection, setSelection] = useState({
@@ -44,67 +54,98 @@ export default function TodayScreen({ navigation, route }) {
     area: route?.params?.area || 'All',
   });
 
-  const [rules, setRules] = useState([]);
-  const [logs, setLogs] = useState([]);
-  const [allTasks, setAllTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState(null);
+  const [mutatingRuleId, setMutatingRuleId] = useState(null);
 
-  // Load selection and rules
-  const loadData = useCallback(async () => {
-    try {
-      setError(null);
-      let currentSelection = selection;
-      if (!currentSelection.categoryId) {
+  // Range window: past 30 days to next 14 days
+  const today = new Date();
+  const pastWindowStart = formatDate(addDays(today, -30));
+  const futureWindowEnd = formatDate(addDays(today, 14));
+
+  // Load rules with react-query
+  const {
+    data: rules = [],
+    isLoading: rulesLoading,
+    error: rulesError,
+    refetch: refetchRules,
+  } = useQuery({
+    queryKey: ['schedule_rules', selection.categoryId, selection.area],
+    queryFn: () =>
+      fetchScheduleRules({
+        categoryId: selection.categoryId,
+        area: selection.area,
+      }),
+    staleTime: 30 * 1000,
+  });
+
+  // Load task logs with react-query
+  const {
+    data: logs = [],
+    isLoading: logsLoading,
+    error: logsError,
+    refetch: refetchLogs,
+  } = useQuery({
+    queryKey: ['task_logs', pastWindowStart, futureWindowEnd],
+    queryFn: () => fetchTaskLogs(pastWindowStart, futureWindowEnd),
+    staleTime: 30 * 1000,
+  });
+
+  const loading = rulesLoading || logsLoading;
+  const error = rulesError?.message || logsError?.message || null;
+
+  // Realtime subscription for task_logs invalidation
+  useEffect(() => {
+    if (!isConfigured || !supabase?.channel) return;
+
+    const channel = supabase
+      .channel(`worker_task_logs_${pastWindowStart}_${futureWindowEnd}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'task_logs' },
+        () => {
+          queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [pastWindowStart, futureWindowEnd, queryClient]);
+
+  // Compute all tasks using useMemo
+  const allTasks = React.useMemo(() => {
+    if (!rules || rules.length === 0) return [];
+    return buildDueTasks(rules, logs, pastWindowStart, futureWindowEnd);
+  }, [rules, logs, pastWindowStart, futureWindowEnd]);
+
+  // Check saved worker selection on mount if none provided
+  useEffect(() => {
+    async function loadSaved() {
+      if (!selection.categoryId) {
         const saved = await getSavedWorkerSelection();
         if (saved && saved.categoryId) {
-          currentSelection = saved;
-          setSelection(saved);
+          setSelection({
+            categoryId: saved.categoryId,
+            categoryName: saved.categoryName || 'Selected System',
+            area: saved.area || 'All',
+          });
         } else {
-          // If no selection yet, fetch first category
-          const cats = await fetchCategories();
-          if (cats.length > 0) {
-            currentSelection = {
-              categoryId: cats[0].id,
-              categoryName: cats[0].name,
-              area: 'All',
-            };
-            setSelection(currentSelection);
-          }
+          try {
+            const cats = await fetchCategories();
+            if (cats.length > 0) {
+              setSelection({
+                categoryId: cats[0].id,
+                categoryName: cats[0].name,
+                area: 'All',
+              });
+            }
+          } catch (_) {}
         }
       }
-
-      // Query window: 30 days ago to end of next week (covers overdue tasks + current week)
-      const today = new Date();
-      const pastWindowStart = formatDate(addDays(today, -30));
-      const futureWindowEnd = formatDate(addDays(today, 14));
-
-      const [loadedRules, loadedLogs] = await Promise.all([
-        fetchScheduleRules({
-          categoryId: currentSelection.categoryId,
-          area: currentSelection.area,
-        }),
-        fetchTaskLogs(pastWindowStart, futureWindowEnd),
-      ]);
-
-      setRules(loadedRules);
-      setLogs(loadedLogs);
-
-      const computed = buildDueTasks(loadedRules, loadedLogs, pastWindowStart, futureWindowEnd);
-      setAllTasks(computed);
-    } catch (err) {
-      console.warn('Error loading tasks:', err);
-      setError(err.message || 'Failed to load maintenance tasks.');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
     }
-  }, [selection.categoryId, selection.area]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
+    loadSaved();
+  }, []);
 
   // When returning with new selection params
   useEffect(() => {
@@ -117,32 +158,81 @@ export default function TodayScreen({ navigation, route }) {
     }
   }, [route?.params]);
 
-  const onRefresh = () => {
+  const onRefresh = async () => {
     setRefreshing(true);
-    loadData();
+    await Promise.all([refetchRules(), refetchLogs()]);
+    setRefreshing(false);
   };
 
-  const handleUpdateStatus = async (task, status, note) => {
-    try {
-      await upsertTaskLog({
+  // Mutation with optimistic updates & friendly concurrent notice
+  const updateLogMutation = useMutation({
+    mutationFn: async ({ task, status, note }) => {
+      return await upsertTaskLog({
         rule_id: task.rule_id,
         due_date: task.due_date,
         status,
         notes: note,
-        done_by: user?.id || 'worker',
+        done_by: user?.id || null,
       });
-      await loadData();
-    } catch (err) {
+    },
+    onMutate: async ({ task, status, note }) => {
+      setMutatingRuleId(task.rule_id);
+      await queryClient.cancelQueries({ queryKey: ['task_logs'] });
+      const previousLogs = queryClient.getQueryData(['task_logs', pastWindowStart, futureWindowEnd]);
+
+      queryClient.setQueryData(
+        ['task_logs', pastWindowStart, futureWindowEnd],
+        (old = []) => {
+          const filtered = old.filter(
+            (l) => !(l.rule_id === task.rule_id && l.due_date === task.due_date)
+          );
+          return [
+            ...filtered,
+            {
+              id: `opt-${Date.now()}`,
+              rule_id: task.rule_id,
+              due_date: task.due_date,
+              status,
+              notes: note,
+              done_by: user?.id,
+              done_at: new Date().toISOString(),
+            },
+          ];
+        }
+      );
+
+      return { previousLogs };
+    },
+    onError: (err, newTodo, context) => {
+      if (context?.previousLogs) {
+        queryClient.setQueryData(
+          ['task_logs', pastWindowStart, futureWindowEnd],
+          context.previousLogs
+        );
+      }
       alert(err.message || 'Failed to update task.');
-    }
+    },
+    onSettled: () => {
+      setMutatingRuleId(null);
+      queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+    },
+  });
+
+  const handleUpdateStatus = (task, status, note) => {
+    if (mutatingRuleId) return; // double-submit prevention
+    updateLogMutation.mutate({ task, status, note });
   };
 
   const handleUndoStatus = async (task) => {
+    if (mutatingRuleId) return;
     try {
+      setMutatingRuleId(task.rule_id);
       await undoTaskLog(task.rule_id, task.due_date);
-      await loadData();
+      queryClient.invalidateQueries({ queryKey: ['task_logs'] });
     } catch (err) {
       alert(err.message || 'Failed to undo task.');
+    } finally {
+      setMutatingRuleId(null);
     }
   };
 
@@ -168,22 +258,59 @@ export default function TodayScreen({ navigation, route }) {
 
   const perf = computePerformance(selectedDateTasks);
 
+  const [statusReason, setStatusReason] = useState('');
+
+  const topInset = Math.max(
+    insets?.top || 0,
+    Platform.OS === 'android' ? (RNStatusBar.currentHeight || 0) : 0
+  );
+
+  const getStatusColor = () => {
+    if (connStatus === 'connected') return '#10B981';
+    if (connStatus === 'checking') return '#F59E0B';
+    return '#EF4444';
+  };
+
+  const handleStatusPress = () => {
+    const msg =
+      connStatus === 'connected'
+        ? `Supabase connected - Live\nLast checked: ${lastCheckedTime || 'Just now'}`
+        : connStatus === 'checking'
+        ? 'Checking Supabase connection...'
+        : 'Cannot reach Supabase (Offline / Demo Mode)';
+    alert(msg);
+  };
+
   return (
     <View style={styles.screen}>
-      <Header
-        title="Today's Tasks"
-        subtitle={`${selection.categoryName} • ${selection.area}`}
-        navigation={navigation}
-        rightAction={
-          <TouchableOpacity
-            style={styles.changeWorkBtn}
-            onPress={() => navigation.navigate('ChooseWork', { isChangingWork: true })}
-          >
-            <Ionicons name="swap-horizontal" size={16} color={colors.white} />
-            <Text style={styles.changeWorkText}>Change</Text>
-          </TouchableOpacity>
-        }
-      />
+      {/* Slim Native Top Bar with safe area paddingTop */}
+      <View style={[styles.slimTopBar, { paddingTop: topInset + 6, height: topInset + 50 }]}>
+        <View style={styles.slimLeft}>
+          <View style={styles.slimLogo}>
+            <Ionicons name="sunny" size={16} color={colors.white} />
+          </View>
+          <View style={styles.systemChip}>
+            <Text style={styles.systemChipText} numberOfLines={1} ellipsizeMode="tail">
+              {selection.categoryName} • {selection.area}
+            </Text>
+          </View>
+        </View>
+
+        {/* Supabase Status Dot Only (Tapping displays toast/tooltip status) */}
+        <TouchableOpacity
+          style={styles.dotTouch}
+          onPress={handleStatusPress}
+          activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+        >
+          <View
+            style={[
+              styles.statusDotOnly,
+              { backgroundColor: getStatusColor() },
+            ]}
+          />
+        </TouchableOpacity>
+      </View>
 
       <ScrollView
         contentContainerStyle={styles.content}
@@ -191,6 +318,16 @@ export default function TodayScreen({ navigation, route }) {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
         }
       >
+        {/* Large Scrollable Heading inside the scrollable content */}
+        <View style={styles.pageHeadingSection}>
+          <Text style={styles.pageTitle} numberOfLines={1} ellipsizeMode="tail">
+            Today's Tasks
+          </Text>
+          <Text style={styles.pageSubtitle} numberOfLines={1} ellipsizeMode="tail">
+            {selection.categoryName} • {selection.area}
+          </Text>
+        </View>
+
         {/* Quick Date Switcher: Yesterday / Today / Tomorrow */}
         <View style={styles.quickDateRow}>
           <TouchableOpacity
@@ -303,7 +440,10 @@ export default function TodayScreen({ navigation, route }) {
         {loading && !refreshing ? (
           <LoadingSkeleton message="Loading today's maintenance schedule..." />
         ) : error ? (
-          <ErrorMessage message={error} onRetry={loadData} />
+          <ErrorMessage
+            message={error}
+            onRetry={() => { refetchRules(); refetchLogs(); }}
+          />
         ) : (
           <>
             {/* OVERDUE TASKS SECTION */}
@@ -346,7 +486,7 @@ export default function TodayScreen({ navigation, route }) {
                 message="All scheduled maintenance is up to date or no activities planned for this day."
                 icon="checkmark-done-circle-outline"
                 actionLabel="Switch System or Area"
-                onAction={() => navigation.navigate('ChooseWork', { isChangingWork: true })}
+                onAction={() => navigation.navigate('ChooseWorkTab', { isChangingWork: true })}
               />
             ) : (
               Object.entries(groupedTasks).map(([groupName, tasksInGroup]) => (
@@ -381,6 +521,66 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  slimTopBar: {
+    backgroundColor: colors.dark,
+    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: '#262626',
+  },
+  slimLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  slimLogo: {
+    width: 28,
+    height: 28,
+    borderRadius: 8,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 10,
+  },
+  systemChip: {
+    backgroundColor: '#1E1E1E',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    maxWidth: '75%',
+  },
+  systemChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primaryLight,
+  },
+  dotTouch: {
+    padding: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statusDotOnly: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  pageHeadingSection: {
+    marginBottom: 16,
+  },
+  pageTitle: {
+    fontSize: 26,
+    fontWeight: '800',
+    color: colors.dark,
+    letterSpacing: -0.5,
+  },
+  pageSubtitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.primaryDark || '#0284C7',
+    marginTop: 2,
   },
   content: {
     padding: 16,

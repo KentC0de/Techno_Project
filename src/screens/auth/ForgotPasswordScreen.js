@@ -10,8 +10,10 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
+import * as Linking from 'expo-linking';
 import { Ionicons } from '@expo/vector-icons';
 import { supabase } from '../../lib/supabase';
+import { getAuthRedirectUrl } from '../../lib/authRedirect';
 import AuthInput from '../../components/AuthInput';
 import PrimaryButton from '../../components/PrimaryButton';
 import { colors } from '../../theme';
@@ -35,23 +37,28 @@ export default function ForgotPasswordScreen({ navigation }) {
 
     setLoading(true);
     try {
+      const redirectTo = getAuthRedirectUrl('/auth/reset-password');
+
       const { error: err } = await supabase.auth.resetPasswordForEmail(
         email.trim().toLowerCase(),
         {
-          // Update this redirectTo with your actual domain in production
-          redirectTo: undefined,
+          redirectTo,
         }
       );
-      if (err) throw err;
+      if (err) {
+        const msg = err.message || '';
+        if (msg.includes('rate limit') || msg.includes('over_email_send_rate_limit')) {
+          setError('Too many requests. Please wait a few minutes before trying again.');
+          return;
+        }
+        if (msg.toLowerCase().includes('network') || msg.toLowerCase().includes('fetch')) {
+          setError('Connection failed. Please check your internet and try again.');
+          return;
+        }
+      }
       setSent(true);
     } catch (err) {
-      const msg = err.message || '';
-      if (msg.toLowerCase().includes('network') || msg.toLowerCase().includes('fetch')) {
-        setError('Connection failed. Please check your internet and try again.');
-      } else {
-        // Always show success even on "user not found" to avoid email enumeration
-        setSent(true);
-      }
+      setError('Unable to send reset email. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -73,13 +80,13 @@ export default function ForgotPasswordScreen({ navigation }) {
           <View style={styles.successIconBox}>
             <Ionicons name="mail" size={36} color={colors.primary} />
           </View>
-          <Text style={styles.successTitle}>Reset Link Sent!</Text>
+          <Text style={styles.successTitle}>Check your inbox</Text>
           <Text style={styles.successText}>
-            We sent a password reset link to{'\n'}
+            If this email is registered, we sent a password reset link to{'\n'}
             <Text style={{ fontWeight: '700', color: colors.dark }}>{email.trim()}</Text>
           </Text>
           <Text style={styles.successHint}>
-            Check your inbox (and spam folder) and follow the link to reset your password.
+            Follow the link in your email to choose a new password. If you don't see it, check your spam folder.
           </Text>
           <TouchableOpacity
             style={styles.backBtn}
@@ -104,7 +111,6 @@ export default function ForgotPasswordScreen({ navigation }) {
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
-          {/* Back button */}
           <TouchableOpacity
             style={styles.backCircle}
             onPress={() => navigation.goBack()}
@@ -113,13 +119,14 @@ export default function ForgotPasswordScreen({ navigation }) {
             <Ionicons name="chevron-back" size={20} color={colors.dark} />
           </TouchableOpacity>
 
-          <Text style={styles.title}>Forgot Password</Text>
+          <Text style={styles.title}>Forgot Password?</Text>
           <Text style={styles.subtitle}>
-            Enter your email address to receive a reset link and regain access to your account.
+            Enter your email and we'll send you instructions to reset your password.
           </Text>
 
           {error ? (
             <View style={styles.errorBox}>
+              <Ionicons name="alert-circle" size={16} color="#DC2626" style={{ marginRight: 8, marginTop: 1 }} />
               <Text style={styles.errorText}>{error}</Text>
             </View>
           ) : null}
@@ -139,7 +146,7 @@ export default function ForgotPasswordScreen({ navigation }) {
           />
 
           <PrimaryButton
-            title="Continue"
+            title="Send Reset Link"
             onPress={handleSend}
             loading={loading}
             disabled={loading}
@@ -147,9 +154,12 @@ export default function ForgotPasswordScreen({ navigation }) {
             style={styles.btn}
           />
 
-          <View style={styles.backRow}>
+          <View style={styles.signInRow}>
+            <Text style={styles.signInText}>Remember your password? </Text>
             <TouchableOpacity onPress={() => navigation.navigate('WorkerLogin')}>
-              <Text style={styles.link}>← Back to Log In</Text>
+              <Text style={[styles.signInText, styles.link, { fontWeight: '700' }]}>
+                Log In
+              </Text>
             </TouchableOpacity>
           </View>
         </ScrollView>
@@ -165,7 +175,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 28,
     paddingTop: 56,
     paddingBottom: 48,
-    justifyContent: 'flex-start',
   },
   backCircle: {
     width: 40,
@@ -174,7 +183,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.white,
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 24,
+    marginBottom: 28,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
@@ -197,22 +206,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
   },
   errorBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: '#FEF2F2',
     borderLeftWidth: 4,
-    borderLeftColor: colors.primary,
-    backgroundColor: colors.white,
+    borderLeftColor: '#DC2626',
     paddingVertical: 10,
     paddingHorizontal: 14,
     borderRadius: 8,
     marginBottom: 16,
   },
   errorText: {
+    flex: 1,
     fontSize: 13,
-    color: colors.dark,
+    color: '#991B1B',
     fontWeight: '600',
     lineHeight: 18,
   },
   btn: { marginTop: 8, marginBottom: 20 },
-  backRow: { alignItems: 'center' },
+  signInRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  signInText: { fontSize: 14, color: '#9CA3AF' },
   link: { color: colors.primary, fontSize: 14, fontWeight: '600' },
 
   // Success state
@@ -221,12 +238,12 @@ const styles = StyleSheet.create({
     backgroundColor: '#F3F4F6',
     paddingHorizontal: 28,
     paddingTop: 56,
+    paddingBottom: 48,
   },
   successInner: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    marginTop: -60,
   },
   successIconBox: {
     width: 80,
@@ -246,7 +263,7 @@ const styles = StyleSheet.create({
   },
   successText: {
     fontSize: 15,
-    color: '#9CA3AF',
+    color: '#475569',
     textAlign: 'center',
     lineHeight: 22,
     marginBottom: 10,
@@ -257,6 +274,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 20,
     marginBottom: 36,
+    maxWidth: 320,
   },
   backBtn: {
     backgroundColor: colors.primary,
@@ -275,4 +293,3 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
 });
-

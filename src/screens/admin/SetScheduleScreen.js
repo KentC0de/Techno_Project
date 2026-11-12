@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
 import {
   fetchCategories,
@@ -19,19 +20,16 @@ import {
 } from '../../lib/dataService';
 import { formatDate, parseDate, getIsoWeekday, addDays } from '../../utils/schedule';
 import Header from '../../components/Header';
+import PageContainer from '../../components/PageContainer';
 import FrequencyBadge from '../../components/FrequencyBadge';
 import { colors, layout } from '../../theme';
 
 export default function SetScheduleScreen({ navigation }) {
   const { user } = useAuth();
+  const queryClient = useQueryClient();
 
-  const [categories, setCategories] = useState([]);
   const [selectedCatId, setSelectedCatId] = useState(null);
-
-  const [groups, setGroups] = useState([]);
   const [selectedGroupId, setSelectedGroupId] = useState(null);
-
-  const [equipmentList, setEquipmentList] = useState([]);
   const [selectedArea, setSelectedArea] = useState('All');
   const [selectedEquipmentIds, setSelectedEquipmentIds] = useState(new Set());
 
@@ -42,77 +40,103 @@ export default function SetScheduleScreen({ navigation }) {
   const [weekday, setWeekday] = useState(1); // 1 = Monday
   const [notes, setNotes] = useState('');
 
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
 
-  // 1. Load categories
+  // 1. Categories query (reference data: 10m cache)
+  const {
+    data: categories = [],
+    isLoading: loadingCategories,
+  } = useQuery({
+    queryKey: ['categories'],
+    queryFn: fetchCategories,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  // Select first category by default if none selected
   useEffect(() => {
-    async function init() {
-      try {
-        setLoading(true);
-        const cats = await fetchCategories();
-        setCategories(cats);
-        if (cats.length > 0) {
-          setSelectedCatId(cats[0].id);
-        }
-      } catch (err) {
-        setErrorMessage('Failed to load categories.');
-      } finally {
-        setLoading(false);
-      }
+    if (categories.length > 0 && !selectedCatId) {
+      setSelectedCatId(categories[0].id);
     }
-    init();
-  }, []);
+  }, [categories, selectedCatId]);
 
-  // 2. Load groups when category changes
+  // 2. Groups query
+  const {
+    data: groups = [],
+    isLoading: loadingGroups,
+  } = useQuery({
+    queryKey: ['groups', selectedCatId],
+    queryFn: () => fetchGroups(selectedCatId),
+    enabled: !!selectedCatId,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  const groupsIdsKey = useMemo(() => groups.map((g) => g.id).join(','), [groups]);
+
+  // Select first group when category or groups list changes
   useEffect(() => {
-    if (!selectedCatId) return;
-    async function loadGroups() {
-      try {
-        const grps = await fetchGroups(selectedCatId);
-        setGroups(grps);
-        if (grps.length > 0) {
-          setSelectedGroupId(grps[0].id);
-        } else {
-          setSelectedGroupId(null);
-          setEquipmentList([]);
-        }
-      } catch (err) {
-        setErrorMessage('Failed to load groups.');
-      }
+    if (groups.length > 0) {
+      setSelectedGroupId((prev) => (groups.some((g) => g.id === prev) ? prev : groups[0].id));
+    } else {
+      setSelectedGroupId(null);
+      setSelectedEquipmentIds((prev) => (prev.size === 0 ? prev : new Set()));
     }
-    loadGroups();
-  }, [selectedCatId]);
+  }, [groupsIdsKey, groups]);
 
-  // 3. Load equipment when group changes
+  // 3. Equipment query
+  const {
+    data: equipmentList = [],
+    isLoading: loadingEquipment,
+  } = useQuery({
+    queryKey: ['equipment', selectedGroupId],
+    queryFn: () => fetchEquipment({ groupId: selectedGroupId, activeOnly: true }),
+    enabled: !!selectedGroupId,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  // Stable key representing current equipment ids
+  const equipmentIdsKey = useMemo(
+    () => equipmentList.map((e) => e.id).join(','),
+    [equipmentList]
+  );
+
+  // Auto-select all equipment and suggest default frequency
   useEffect(() => {
-    if (!selectedGroupId) {
-      setEquipmentList([]);
-      setSelectedEquipmentIds(new Set());
-      return;
-    }
-    async function loadEq() {
-      try {
-        const eq = await fetchEquipment({ groupId: selectedGroupId, activeOnly: true });
-        setEquipmentList(eq);
-
-        // Reset selected area and selection
-        setSelectedArea('All');
-        const initialSelected = new Set(eq.map((item) => item.id));
-        setSelectedEquipmentIds(initialSelected);
-
-        // Suggest frequency from first equipment's default_freq if present
-        if (eq.length > 0 && eq[0].default_freq && eq[0].default_freq.length > 0) {
-          setFrequency(eq[0].default_freq[0]);
+    if (equipmentList.length > 0) {
+      setSelectedArea((prev) => (prev === 'All' ? prev : 'All'));
+      const newIds = new Set(equipmentList.map((item) => item.id));
+      setSelectedEquipmentIds((prev) => {
+        if (prev.size === newIds.size && [...newIds].every((id) => prev.has(id))) {
+          return prev;
         }
-      } catch (err) {
-        setErrorMessage('Failed to load equipment.');
+        return newIds;
+      });
+      const firstFreq = equipmentList[0]?.default_freq?.[0];
+      if (firstFreq) {
+        setFrequency((prev) => (prev === firstFreq ? prev : firstFreq));
       }
+    } else {
+      setSelectedEquipmentIds((prev) => (prev.size === 0 ? prev : new Set()));
     }
-    loadEq();
-  }, [selectedGroupId]);
+  }, [equipmentIdsKey, equipmentList]);
+
+  // Bulk create mutation with double-submit protection
+  const createRulesMutation = useMutation({
+    mutationFn: (rules) => createScheduleRules(rules),
+    onSuccess: (data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
+      setSuccessMessage(`Successfully created ${variables.length} maintenance schedule rule(s)!`);
+      setTimeout(() => {
+        setSuccessMessage('');
+      }, 5000);
+    },
+    onError: (err) => {
+      setErrorMessage(err.message || 'Failed to save rules. Please check your network and try again.');
+    },
+  });
+
+  const loading = loadingCategories || (!!selectedCatId && loadingGroups);
+  const saving = createRulesMutation.isPending;
 
   // Filter equipment by area if applicable
   const availableAreas = Array.from(
@@ -157,32 +181,20 @@ export default function SetScheduleScreen({ navigation }) {
       return;
     }
 
-    try {
-      setSaving(true);
-      setErrorMessage('');
-      setSuccessMessage('');
+    setErrorMessage('');
+    setSuccessMessage('');
 
-      const newRules = Array.from(selectedEquipmentIds).map((eqId) => ({
-        equipment_id: eqId,
-        frequency,
-        start_date: startDate,
-        end_date: endDate.trim() ? endDate.trim() : null,
-        weekday: frequency === 'w' ? weekday : null,
-        notes: notes.trim() ? notes.trim() : null,
-        created_by: user?.id || null,
-      }));
+    const newRules = Array.from(selectedEquipmentIds).map((eqId) => ({
+      equipment_id: eqId,
+      frequency,
+      start_date: startDate,
+      end_date: endDate.trim() ? endDate.trim() : null,
+      weekday: frequency === 'w' ? weekday : null,
+      notes: notes.trim() ? notes.trim() : null,
+      created_by: user?.id || null,
+    }));
 
-      await createScheduleRules(newRules);
-      setSuccessMessage(`Successfully created ${newRules.length} maintenance schedule rule(s)!`);
-      // Scroll to top or clear
-      setTimeout(() => {
-        setSuccessMessage('');
-      }, 5000);
-    } catch (err) {
-      setErrorMessage(err.message || 'Failed to create schedule rules.');
-    } finally {
-      setSaving(false);
-    }
+    createRulesMutation.mutate(newRules);
   };
 
   const freqOptions = [
@@ -211,7 +223,7 @@ export default function SetScheduleScreen({ navigation }) {
         navigation={navigation}
       />
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <PageContainer>
         {/* Messages */}
         {successMessage ? (
           <View style={styles.successBanner}>
@@ -488,7 +500,7 @@ export default function SetScheduleScreen({ navigation }) {
             </>
           )}
         </TouchableOpacity>
-      </ScrollView>
+      </PageContainer>
     </View>
   );
 }
@@ -499,11 +511,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   content: {
-    padding: 16,
-    maxWidth: 900,
-    width: '100%',
-    alignSelf: 'center',
     paddingBottom: 40,
+    width: '100%',
   },
   successBanner: {
     flexDirection: 'row',

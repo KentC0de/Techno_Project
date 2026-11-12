@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -6,8 +6,12 @@ import {
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { supabase } from '../../lib/supabase';
+import { useAuth } from '../../context/AuthContext';
 import {
   fetchCategories,
   fetchScheduleRules,
@@ -23,51 +27,84 @@ import {
   computePerformance,
 } from '../../utils/schedule';
 import Header from '../../components/Header';
+import PageContainer from '../../components/PageContainer';
+import { useBreakpoint } from '../../hooks/useBreakpoint';
 import StatusBadge from '../../components/StatusBadge';
 import FrequencyBadge from '../../components/FrequencyBadge';
+import ExportScheduleModal from '../../components/ExportScheduleModal';
+import { useSystemFilter } from '../../context/SystemFilterContext';
 import { colors, layout } from '../../theme';
 
 export default function PerformanceScreen({ navigation }) {
+  const { user } = useAuth();
   const [periodType, setPeriodType] = useState('week'); // 'week' | 'month'
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
+  const [exportModalVisible, setExportModalVisible] = useState(false);
+  const { selectedSystem } = useSystemFilter();
+  const queryClient = useQueryClient();
 
-  const [categories, setCategories] = useState([]);
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
-
-  const loadData = useCallback(async () => {
-    try {
-      setLoading(true);
-      let rangeStart, rangeEnd;
-      if (periodType === 'month') {
-        const m = getMonthRange(currentDateStr);
-        rangeStart = m.start;
-        rangeEnd = m.end;
-      } else {
-        const w = getWorkWeek(currentDateStr);
-        rangeStart = w.start;
-        rangeEnd = w.end;
-      }
-
-      const [cats, rules, logs] = await Promise.all([
-        fetchCategories(),
-        fetchScheduleRules(),
-        fetchTaskLogs(rangeStart, rangeEnd),
-      ]);
-
-      setCategories(cats);
-      const computed = buildDueTasks(rules, logs, rangeStart, rangeEnd);
-      setTasks(computed);
-    } catch (err) {
-      console.warn('Error loading performance data:', err);
-    } finally {
-      setLoading(false);
+  // Compute active range
+  const { rangeStart, rangeEnd } = useMemo(() => {
+    if (periodType === 'month') {
+      const m = getMonthRange(currentDateStr);
+      return { rangeStart: m.start, rangeEnd: m.end };
     }
+    const w = getWorkWeek(currentDateStr);
+    return { rangeStart: w.start, rangeEnd: w.end };
   }, [periodType, currentDateStr]);
 
+  // Categories (reference data: 10m cache)
+  const { data: categories = [], isLoading: loadingCats } = useQuery({
+    queryKey: ['categories'],
+    queryFn: fetchCategories,
+    staleTime: 10 * 60 * 1000,
+  });
+
+  // Schedule Rules (30s stale)
+  const { data: rules = [], isLoading: loadingRules } = useQuery({
+    queryKey: ['schedule_rules'],
+    queryFn: fetchScheduleRules,
+    staleTime: 30 * 1000,
+  });
+
+  // Task Logs for date range (30s stale)
+  const { data: logs = [], isLoading: loadingLogs } = useQuery({
+    queryKey: ['task_logs', rangeStart, rangeEnd],
+    queryFn: () => fetchTaskLogs(rangeStart, rangeEnd),
+    staleTime: 30 * 1000,
+  });
+
+  // Realtime subscription for task_logs invalidation
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    const channel = supabase
+      .channel(`perf-task-logs-${rangeStart}-${rangeEnd}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'task_logs' },
+        () => {
+          queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [rangeStart, rangeEnd, queryClient]);
+
+  // Memoize task calculations, filtered by selectedSystem if not 'ALL'
+  const tasks = useMemo(() => {
+    const all = buildDueTasks(rules, logs, rangeStart, rangeEnd);
+    if (!selectedSystem || selectedSystem === 'ALL') {
+      return all;
+    }
+    return all.filter((t) => {
+      const code = t.equipment?.groups?.categories?.code || t.categoryCode || t.category?.code;
+      return code === selectedSystem;
+    });
+  }, [rules, logs, rangeStart, rangeEnd, selectedSystem]);
+
+  const loading = loadingCats || loadingRules || loadingLogs;
 
   // Overall performance
   const overallPerf = computePerformance(tasks);
@@ -123,9 +160,21 @@ export default function PerformanceScreen({ navigation }) {
         title="Performance Report"
         subtitle="% Performance to Maintenance Schedule"
         navigation={navigation}
+        rightAction={
+          Platform.OS === 'web' && user?.role === 'admin' ? (
+            <TouchableOpacity
+              style={styles.exportExcelBtn}
+              onPress={() => setExportModalVisible(true)}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="download-outline" size={17} color={colors.primary} />
+              <Text style={styles.exportExcelText}>Export Excel</Text>
+            </TouchableOpacity>
+          ) : null
+        }
       />
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <PageContainer>
         {/* Period Selector Bar */}
         <View style={styles.periodBar}>
           <View style={styles.periodToggle}>
@@ -329,7 +378,14 @@ export default function PerformanceScreen({ navigation }) {
             )}
           </>
         )}
-      </ScrollView>
+
+        {/* Export to Excel Modal */}
+        <ExportScheduleModal
+          visible={exportModalVisible}
+          onClose={() => setExportModalVisible(false)}
+          initialPeriodType={periodType}
+        />
+      </PageContainer>
     </View>
   );
 }
@@ -339,12 +395,25 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
+  exportExcelBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    gap: 6,
+  },
+  exportExcelText: {
+    color: colors.primary,
+    fontWeight: '700',
+    fontSize: 12,
+  },
   content: {
-    padding: 16,
-    maxWidth: 1000,
-    width: '100%',
-    alignSelf: 'center',
     paddingBottom: 40,
+    width: '100%',
   },
   periodBar: {
     alignItems: 'center',

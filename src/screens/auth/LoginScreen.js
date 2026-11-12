@@ -40,7 +40,7 @@ export default function LoginScreen() {
       setLoading(true);
       setError('');
       if (isSignUp) {
-        await signUp(email.trim(), password, fullName.trim(), role);
+        await signUp(email.trim(), password, fullName.trim());
       } else {
         await signIn(email.trim(), password);
       }

@@ -74,6 +74,9 @@ export default function WorkerSignUpScreen({ navigation }) {
           full_name: profile?.full_name || fullName.trim(),
           role: profile?.role || 'worker',
         });
+        import('../../lib/activityLog').then(({ logActivity }) => {
+          logActivity('auth.signup', 'auth.users', data.user.id, { email: data.user.email });
+        }).catch(() => {});
         // AppNavigator will redirect automatically
       }
     } catch (err) {

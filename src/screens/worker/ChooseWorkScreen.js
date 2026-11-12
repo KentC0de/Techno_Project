@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -6,19 +6,50 @@ import {
   ScrollView,
   StyleSheet,
   ActivityIndicator,
+  Platform,
+  StatusBar as RNStatusBar,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { fetchCategories, getSavedWorkerSelection, saveWorkerSelection } from '../../lib/dataService';
-import Header from '../../components/Header';
-import { colors, layout } from '../../theme';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  fetchCategories,
+  fetchGroups,
+  fetchEquipment,
+  fetchScheduleRules,
+  fetchTaskLogs,
+  getSavedWorkerSelection,
+  saveWorkerSelection,
+} from '../../lib/dataService';
+import {
+  formatDate,
+  addDays,
+  getWorkWeek,
+  buildDueTasks,
+  computePerformance,
+} from '../../utils/schedule';
+import FrequencyBadge from '../../components/FrequencyBadge';
+import ProgressBar from '../../components/ProgressBar';
+import { colors } from '../../theme';
 
 export default function ChooseWorkScreen({ navigation, route }) {
+  const insets = useSafeAreaInsets();
+  const topInset = Math.max(
+    insets?.top || 0,
+    Platform.OS === 'android' ? (RNStatusBar.currentHeight || 0) : 0
+  );
+
   const [categories, setCategories] = useState([]);
   const [selectedCatId, setSelectedCatId] = useState(null);
   const [selectedArea, setSelectedArea] = useState('All');
   const [loading, setLoading] = useState(true);
 
-  const isChangingWork = route?.params?.isChangingWork ?? false;
+  const [rules, setRules] = useState([]);
+  const [logs, setLogs] = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [equipmentList, setEquipmentList] = useState([]);
+
+  const todayStr = formatDate(new Date());
+  const workWeek = useMemo(() => getWorkWeek(todayStr), [todayStr]);
 
   const categoryIcons = {
     A: 'hardware-chip-outline',
@@ -28,7 +59,7 @@ export default function ChooseWorkScreen({ navigation, route }) {
   };
 
   useEffect(() => {
-    async function load() {
+    async function loadInitial() {
       try {
         setLoading(true);
         const [cats, saved] = await Promise.all([
@@ -40,45 +71,100 @@ export default function ChooseWorkScreen({ navigation, route }) {
         if (saved && saved.categoryId) {
           setSelectedCatId(saved.categoryId);
           setSelectedArea(saved.area || 'All');
-          // If not changing work explicitly and already selected, automatically jump to TodayScreen
-          if (!isChangingWork) {
-            navigation.replace('WorkerToday', {
-              categoryId: saved.categoryId,
-              categoryName: saved.categoryName,
-              area: saved.area || 'All',
-            });
-            return;
-          }
         } else if (cats.length > 0) {
           setSelectedCatId(cats[0].id);
         }
       } catch (err) {
-        console.warn('Error loading categories:', err);
+        if (__DEV__) console.log('Error loading systems:', err);
       } finally {
         setLoading(false);
       }
     }
-    load();
-  }, [isChangingWork]);
+    loadInitial();
+  }, []);
 
-  const activeCategory = categories.find((c) => c.id === selectedCatId);
-  const hasAreas = activeCategory?.code === 'B'; // PV Field Area has Area 1, 2, 3
+  // Fetch groups and equipment reference for the selected system
+  useEffect(() => {
+    if (!selectedCatId) return;
 
-  const handleConfirm = async () => {
-    if (!activeCategory) return;
-    const finalArea = hasAreas ? selectedArea : 'All';
-    const selection = {
-      categoryId: activeCategory.id,
-      categoryCode: activeCategory.code,
-      categoryName: activeCategory.name,
-      area: finalArea,
-    };
-    await saveWorkerSelection(selection);
+    async function loadSystemDetails() {
+      try {
+        const [grps, eq, rls, lgs] = await Promise.all([
+          fetchGroups(selectedCatId),
+          fetchEquipment({ activeOnly: true }),
+          fetchScheduleRules({ categoryId: selectedCatId }),
+          fetchTaskLogs(workWeek.start, workWeek.end),
+        ]);
+        setGroups(grps);
+        setRules(rls);
+        setLogs(lgs);
 
-    if (navigation.canGoBack() && isChangingWork) {
-      navigation.navigate('WorkerToday', selection);
-    } else {
-      navigation.replace('WorkerToday', selection);
+        // Filter equipment belonging to groups of this category
+        const grpIds = new Set(grps.map((g) => g.id));
+        const filteredEq = eq.filter((item) => grpIds.has(item.group_id));
+        setEquipmentList(filteredEq);
+      } catch (err) {
+        if (__DEV__) console.log('Error loading system details:', err);
+      }
+    }
+
+    loadSystemDetails();
+  }, [selectedCatId, workWeek.start, workWeek.end]);
+
+  const selectedCategory = categories.find((c) => c.id === selectedCatId);
+  const isPVField = selectedCategory?.code === 'B';
+
+  // Compute tasks for this week to show weekly overview
+  const weekTasks = useMemo(() => {
+    if (rules.length === 0) return [];
+    return buildDueTasks(rules, logs, workWeek.start, workWeek.end);
+  }, [rules, logs, workWeek.start, workWeek.end]);
+
+  // Today tasks for the selected category
+  const todayTasks = useMemo(() => {
+    return weekTasks.filter((t) => {
+      const matchDate = t.due_date === todayStr;
+      const matchArea = !isPVField || selectedArea === 'All' || t.equipment?.area === selectedArea;
+      return matchDate && matchArea;
+    });
+  }, [weekTasks, todayStr, isPVField, selectedArea]);
+
+  const todayPerf = computePerformance(todayTasks);
+
+  // Day-by-day weekly breakdown (Mon to Sun)
+  const daysOfWeek = useMemo(() => {
+    const list = [];
+    for (let i = 0; i < 7; i++) {
+      const dStr = formatDate(addDays(new Date(workWeek.start), i));
+      const dTasks = weekTasks.filter((t) => {
+        const matchDate = t.due_date === dStr;
+        const matchArea = !isPVField || selectedArea === 'All' || t.equipment?.area === selectedArea;
+        return matchDate && matchArea;
+      });
+      const p = computePerformance(dTasks);
+      list.push({ date: dStr, ...p });
+    }
+    return list;
+  }, [weekTasks, workWeek.start, isPVField, selectedArea]);
+
+  const handleSelectCategory = async (cat) => {
+    setSelectedCatId(cat.id);
+    const newArea = cat.code === 'B' ? selectedArea : 'All';
+    await saveWorkerSelection({
+      categoryId: cat.id,
+      categoryName: cat.name,
+      area: newArea,
+    });
+  };
+
+  const handleSelectArea = async (area) => {
+    setSelectedArea(area);
+    if (selectedCategory) {
+      await saveWorkerSelection({
+        categoryId: selectedCategory.id,
+        categoryName: selectedCategory.name,
+        area,
+      });
     }
   };
 
@@ -86,113 +172,76 @@ export default function ChooseWorkScreen({ navigation, route }) {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color={colors.primary} />
-        <Text style={styles.loadingText}>Loading systems...</Text>
       </View>
     );
   }
 
   return (
     <View style={styles.screen}>
-      <Header
-        title="Choose My Work"
-        subtitle="Select your assigned system and work area"
-        navigation={navigation}
-      />
-
-      <ScrollView contentContainerStyle={styles.content}>
-        {/* Step 1: Pick System */}
-        <View style={styles.sectionHeader}>
-          <View style={styles.stepBadge}>
-            <Text style={styles.stepNumber}>1</Text>
+      {/* Slim Header */}
+      <View style={[styles.topBar, { paddingTop: topInset + 6, height: topInset + 52 }]}>
+        <View style={styles.topBarLeft}>
+          <View style={styles.sunLogo}>
+            <Ionicons name="sunny" size={16} color={colors.white} />
           </View>
-          <Text style={styles.sectionTitle}>Pick Maintenance System</Text>
+          <Text style={styles.topBarTitle}>My System</Text>
         </View>
+        <Text style={styles.topBarSubtitle}>Choose Your Station</Text>
+      </View>
 
-        <View style={styles.cardGrid}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        <Text style={styles.sectionHeader}>SELECT YOUR SYSTEM</Text>
+
+        {/* 4 System Cards */}
+        <View style={styles.systemsGrid}>
           {categories.map((cat) => {
-            const isSelected = selectedCatId === cat.id;
-            const iconName = categoryIcons[cat.code] || 'cube-outline';
+            const isSelected = cat.id === selectedCatId;
             return (
               <TouchableOpacity
                 key={cat.id}
-                style={[
-                  styles.categoryCard,
-                  isSelected && styles.categoryCardSelected,
-                ]}
-                onPress={() => {
-                  setSelectedCatId(cat.id);
-                  if (cat.code !== 'B') setSelectedArea('All');
-                }}
+                style={[styles.systemCard, isSelected && styles.systemCardActive]}
+                onPress={() => handleSelectCategory(cat)}
                 activeOpacity={0.8}
               >
-                <View
-                  style={[
-                    styles.cardIconBox,
-                    isSelected && styles.cardIconBoxSelected,
-                  ]}
-                >
+                <View style={[styles.iconBox, isSelected && styles.iconBoxActive]}>
                   <Ionicons
-                    name={iconName}
-                    size={28}
+                    name={categoryIcons[cat.code] || 'grid-outline'}
+                    size={24}
                     color={isSelected ? colors.white : colors.primary}
                   />
                 </View>
-
-                <View style={styles.cardTextBox}>
-                  <Text style={[styles.codeTag, isSelected && styles.codeTagSelected]}>
-                    SYSTEM {cat.code}
-                  </Text>
-                  <Text
-                    style={[styles.catName, isSelected && styles.catNameSelected]}
-                    numberOfLines={2}
-                  >
+                <View style={styles.cardContent}>
+                  <Text style={[styles.systemName, isSelected && styles.systemNameActive]}>
                     {cat.name}
                   </Text>
+                  <Text style={styles.systemCode}>System {cat.code}</Text>
                 </View>
-
-                {isSelected ? (
-                  <Ionicons
-                    name="checkmark-circle"
-                    size={24}
-                    color={colors.primary}
-                    style={styles.checkIcon}
-                  />
-                ) : null}
+                {isSelected && (
+                  <View style={styles.checkCircle}>
+                    <Ionicons name="checkmark" size={14} color={colors.white} />
+                  </View>
+                )}
               </TouchableOpacity>
             );
           })}
         </View>
 
-        {/* Step 2: Pick Area (if applies) */}
-        {hasAreas && (
+        {/* Area Selection (PV Field Area) */}
+        {isPVField && (
           <View style={styles.areaSection}>
-            <View style={styles.sectionHeader}>
-              <View style={styles.stepBadge}>
-                <Text style={styles.stepNumber}>2</Text>
-              </View>
-              <Text style={styles.sectionTitle}>Select PV Field Area</Text>
-            </View>
-
-            <View style={styles.areaRow}>
-              {['All', 'Area 1', 'Area 2', 'Area 3'].map((areaOption) => {
-                const isAreaSelected = selectedArea === areaOption;
+            <Text style={styles.sectionHeader}>PV FIELD SUB-AREA</Text>
+            <View style={styles.areaPillsRow}>
+              {['Area 1', 'Area 2', 'Area 3', 'All'].map((areaName) => {
+                const isActive = selectedArea === areaName;
                 return (
                   <TouchableOpacity
-                    key={areaOption}
-                    style={[
-                      styles.areaChip,
-                      isAreaSelected && styles.areaChipSelected,
-                    ]}
-                    onPress={() => setSelectedArea(areaOption)}
-                    activeOpacity={0.8}
+                    key={areaName}
+                    style={[styles.areaPill, isActive && styles.areaPillActive]}
+                    onPress={() => handleSelectArea(areaName)}
+                    activeOpacity={0.7}
                   >
-                    <Text
-                      style={[
-                        styles.areaChipText,
-                        isAreaSelected && styles.areaChipTextSelected,
-                      ]}
-                    >
-                      {areaOption}
+                    <Text style={[styles.areaPillText, isActive && styles.areaPillTextActive]}>
+                      {areaName}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -201,17 +250,86 @@ export default function ChooseWorkScreen({ navigation, route }) {
           </View>
         )}
 
-        {/* Start Work Action Button */}
-        <TouchableOpacity
-          style={styles.confirmBtn}
-          onPress={handleConfirm}
-          activeOpacity={0.85}
-        >
-          <Text style={styles.confirmBtnText}>
-            View Today's Tasks
+        {/* Today's Tasks Summary for Selection */}
+        <View style={styles.summaryCard}>
+          <View style={styles.summaryTop}>
+            <View>
+              <Text style={styles.summaryTitle}>Today's Assigned Work</Text>
+              <Text style={styles.summarySub}>
+                {selectedCategory?.name || 'Selected System'}
+                {isPVField ? ` • ${selectedArea}` : ''}
+              </Text>
+            </View>
+            <TouchableOpacity
+              style={styles.viewTasksBtn}
+              onPress={() => navigation.navigate('WorkerTodayTab')}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.viewTasksBtnText}>View Tasks</Text>
+              <Ionicons name="arrow-forward" size={14} color={colors.white} />
+            </TouchableOpacity>
+          </View>
+          <View style={{ marginTop: 14 }}>
+            <ProgressBar
+              completed={todayPerf.completed}
+              total={todayPerf.total}
+              percent={todayPerf.percent}
+            />
+          </View>
+        </View>
+
+        {/* Weekly Overview (Mon–Sun) */}
+        <View style={styles.weekOverviewCard}>
+          <Text style={styles.sectionHeader}>THIS WEEK'S OVERVIEW (MON–SUN)</Text>
+          <View style={styles.weekGrid}>
+            {daysOfWeek.map((day, idx) => {
+              const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+              const isToday = day.date === todayStr;
+              return (
+                <View key={day.date} style={[styles.dayCol, isToday && styles.dayColToday]}>
+                  <Text style={[styles.dayName, isToday && styles.dayTextActive]}>
+                    {dayLabels[idx]}
+                  </Text>
+                  <Text style={[styles.dayTotal, isToday && styles.dayTextActive]}>
+                    {day.total}
+                  </Text>
+                  <Text style={[styles.dayDone, isToday && styles.dayTextActive]}>
+                    {day.completed} done
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+
+        {/* Groups and Equipment Reference */}
+        <View style={styles.equipmentSection}>
+          <Text style={styles.sectionHeader}>
+            SYSTEM EQUIPMENT REFERENCE ({equipmentList.length})
           </Text>
-          <Ionicons name="arrow-forward" size={20} color={colors.white} style={{ marginLeft: 8 }} />
-        </TouchableOpacity>
+          {groups.map((grp) => {
+            const grpEq = equipmentList.filter((e) => e.group_id === grp.id);
+            if (grpEq.length === 0) return null;
+            return (
+              <View key={grp.id} style={styles.groupCard}>
+                <Text style={styles.groupCardTitle}>{grp.name}</Text>
+                {grpEq.map((eq) => (
+                  <View key={eq.id} style={styles.eqItem}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.eqName}>{eq.name}</Text>
+                      {eq.area ? <Text style={styles.eqArea}>{eq.area}</Text> : null}
+                    </View>
+                    <View style={styles.freqRow}>
+                      {(eq.default_freq || ['d']).map((f) => (
+                        <FrequencyBadge key={f} frequency={f} />
+                      ))}
+                    </View>
+                  </View>
+                ))}
+              </View>
+            );
+          })}
+        </View>
       </ScrollView>
     </View>
   );
@@ -226,153 +344,254 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: colors.background,
   },
-  loadingText: {
-    marginTop: 12,
-    color: colors.textSecondary,
-    fontSize: 14,
-  },
-  content: {
-    padding: 20,
-    maxWidth: 800,
-    width: '100%',
-    alignSelf: 'center',
-  },
-  sectionHeader: {
+  topBar: {
+    backgroundColor: colors.dark,
+    paddingHorizontal: 20,
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 16,
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: '#262626',
   },
-  stepBadge: {
+  topBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  sunLogo: {
     width: 28,
     height: 28,
-    borderRadius: 14,
-    backgroundColor: colors.dark,
+    borderRadius: 8,
+    backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 10,
   },
-  stepNumber: {
-    color: colors.white,
+  topBarTitle: {
+    fontSize: 16,
     fontWeight: '800',
-    fontSize: 14,
+    color: colors.white,
   },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: colors.dark,
+  topBarSubtitle: {
+    fontSize: 12,
+    color: colors.primaryLight,
+    fontWeight: '500',
   },
-  cardGrid: {
+  content: {
+    padding: 20,
+    paddingBottom: 40,
+  },
+  sectionHeader: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.darkMuted,
+    marginBottom: 12,
+    letterSpacing: 0.5,
+  },
+  systemsGrid: {
     gap: 12,
-    marginBottom: 24,
+    marginBottom: 20,
   },
-  categoryCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
+  systemCard: {
     backgroundColor: colors.white,
     borderRadius: 16,
     padding: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
     borderWidth: 2,
-    borderColor: colors.border,
-    minHeight: layout.minTouchTarget * 1.5,
+    borderColor: 'transparent',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowRadius: 6,
     elevation: 2,
   },
-  categoryCardSelected: {
+  systemCardActive: {
     borderColor: colors.primary,
-    backgroundColor: colors.primaryVeryLight,
+    backgroundColor: '#F0F9FF',
   },
-  cardIconBox: {
-    width: 52,
-    height: 52,
+  iconBox: {
+    width: 48,
+    height: 48,
     borderRadius: 12,
-    backgroundColor: colors.primaryVeryLight,
+    backgroundColor: '#E0F2FE',
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 14,
+    marginRight: 16,
   },
-  cardIconBoxSelected: {
+  iconBoxActive: {
     backgroundColor: colors.primary,
   },
-  cardTextBox: {
+  cardContent: {
     flex: 1,
   },
-  codeTag: {
-    fontSize: 11,
-    fontWeight: '800',
-    color: colors.textSecondary,
-    letterSpacing: 0.5,
+  systemName: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.dark,
     marginBottom: 2,
   },
-  codeTagSelected: {
-    color: colors.primaryDark,
+  systemNameActive: {
+    color: colors.primaryDark || '#0284C7',
   },
-  catName: {
-    fontSize: 17,
-    fontWeight: '700',
-    color: colors.dark,
+  systemCode: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textMuted,
   },
-  catNameSelected: {
-    color: colors.dark,
-  },
-  checkIcon: {
-    marginLeft: 8,
+  checkCircle: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   areaSection: {
-    marginBottom: 24,
+    marginBottom: 20,
   },
-  areaRow: {
+  areaPillsRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
+    gap: 8,
   },
-  areaChip: {
-    backgroundColor: colors.white,
-    borderWidth: 1.5,
-    borderColor: colors.border,
-    borderRadius: 12,
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    minHeight: layout.minTouchTarget,
-    justifyContent: 'center',
-    alignItems: 'center',
+  areaPill: {
     flex: 1,
-    minWidth: 80,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
   },
-  areaChipSelected: {
+  areaPillActive: {
     backgroundColor: colors.primary,
     borderColor: colors.primary,
   },
-  areaChipText: {
-    fontSize: 14,
+  areaPillText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  areaPillTextActive: {
+    color: colors.white,
     fontWeight: '700',
-    color: colors.dark,
   },
-  areaChipTextSelected: {
-    color: colors.white,
+  summaryCard: {
+    backgroundColor: colors.white,
+    borderRadius: 16,
+    padding: 18,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  confirmBtn: {
+  summaryTop: {
     flexDirection: 'row',
-    backgroundColor: colors.primary,
-    borderRadius: 14,
-    minHeight: 52,
+    justifyContent: 'space-between',
     alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 12,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 4,
   },
-  confirmBtnText: {
-    color: colors.white,
+  summaryTitle: {
     fontSize: 16,
     fontWeight: '800',
+    color: colors.dark,
+  },
+  summarySub: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  viewTasksBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
+    gap: 4,
+  },
+  viewTasksBtnText: {
+    color: colors.white,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  weekOverviewCard: {
+    backgroundColor: colors.white,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  weekGrid: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 6,
+  },
+  dayCol: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 8,
+    borderRadius: 8,
+  },
+  dayColToday: {
+    backgroundColor: colors.primary,
+  },
+  dayName: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
+  dayTotal: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: colors.dark,
+    marginVertical: 4,
+  },
+  dayDone: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#059669',
+  },
+  dayTextActive: {
+    color: colors.white,
+  },
+  equipmentSection: {
+    marginBottom: 20,
+  },
+  groupCard: {
+    backgroundColor: colors.white,
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  groupCardTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.dark,
+    marginBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
+    paddingBottom: 6,
+  },
+  eqItem: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 6,
+  },
+  eqName: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.dark,
+  },
+  eqArea: {
+    fontSize: 11,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  freqRow: {
+    flexDirection: 'row',
+    gap: 4,
   },
 });
-

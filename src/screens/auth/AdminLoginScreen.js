@@ -13,7 +13,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { useAuth } from '../../context/AuthContext';
 import AuthInput from '../../components/AuthInput';
 import PrimaryButton from '../../components/PrimaryButton';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { colors } from '../../theme';
+import { LinearGradient } from 'expo-linear-gradient';
 
 // Try to load the solar background image — fall back gracefully if missing
 let loginBg = null;
@@ -23,10 +25,17 @@ try {
   loginBg = null;
 }
 
-export default function AdminLoginScreen() {
+export default function AdminLoginScreen({ navigation, route }) {
   const { signInWithRoleCheck } = useAuth();
   const { width } = useWindowDimensions();
   const isWide = width >= 900;
+
+  // Set browser document title on web
+  React.useEffect(() => {
+    if (Platform.OS === 'web' && typeof document !== 'undefined') {
+      document.title = 'Admin Portal • Solar PM Hub';
+    }
+  }, []);
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -43,7 +52,17 @@ export default function AdminLoginScreen() {
     setLoading(true);
     try {
       await signInWithRoleCheck(email.trim().toLowerCase(), password, 'admin');
-      // AuthContext user update → AppNavigator redirects automatically
+      // If there was a redirect return path stored in route or localStorage, handle it
+      let returnPath = route?.params?.returnTo;
+      if (!returnPath && Platform.OS === 'web' && typeof window !== 'undefined') {
+        returnPath = window.sessionStorage?.getItem('pm_redirect_after_login');
+        if (returnPath) {
+          window.sessionStorage?.removeItem('pm_redirect_after_login');
+          window.location.href = returnPath;
+          return;
+        }
+      }
+      // Otherwise AppNavigator automatically renders AdminRoot based on user.role === 'admin'
     } catch (err) {
       setError(err.message || 'Sign in failed. Please try again.');
     } finally {
@@ -76,7 +95,7 @@ export default function AdminLoginScreen() {
         autoComplete="email"
         textContentType="emailAddress"
         returnKeyType="next"
-        onSubmitEditing={() => {}}
+        onSubmitEditing={() => { }}
       />
       <AuthInput
         variant="underline"
@@ -103,7 +122,7 @@ export default function AdminLoginScreen() {
 
       <View style={styles.formFooter}>
         <Text style={styles.footerNote}>Authorized personnel only</Text>
-        <Text style={styles.footerCopy}>© 2026 Solar PM Hub. All rights reserved.</Text>
+        <Text style={styles.footerCopy}>© USTP IT Student 2026. All rights reserved.</Text>
       </View>
     </View>
   );
@@ -114,13 +133,16 @@ export default function AdminLoginScreen() {
       <View style={styles.wideRoot}>
         {/* Left image panel */}
         <View style={styles.leftPanel}>
-          {loginBg ? (
+          {loginBg && (
             <Image source={loginBg} style={styles.bgImage} resizeMode="cover" />
-          ) : (
-            <View style={styles.bgGradientFallback} />
           )}
-          {/* Dark overlay */}
-          <View style={styles.overlay} />
+          {/* Linear gradient overlay (or fallback if image missing) */}
+          <LinearGradient
+            colors={['#0A0A0A', '#0EA5E9']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={[StyleSheet.absoluteFill, { opacity: loginBg ? 0.6 : 1 }]}
+          />
           {/* Diagonal slice on the right edge */}
           <View style={styles.diagonalSlice} />
           {/* Content */}
@@ -191,25 +213,6 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: '100%',
     height: '100%',
-  },
-  bgGradientFallback: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    // Simple two-tone via Platform check on web
-    ...(Platform.OS === 'web'
-      ? { background: 'linear-gradient(145deg, #0A0A0A 0%, #0369A1 60%, #0EA5E9 100%)' }
-      : { backgroundColor: '#0A3D62' }),
-  },
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(10, 10, 10, 0.55)',
   },
   // Diagonal slice — white wedge on right edge to create the angled split
   diagonalSlice: {

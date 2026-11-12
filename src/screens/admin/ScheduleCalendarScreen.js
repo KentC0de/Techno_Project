@@ -29,23 +29,104 @@ import {
   getIsoWeekday,
   buildDueTasks,
 } from '../../utils/schedule';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { supabase, isConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
+import { useSystemFilter } from '../../context/SystemFilterContext';
 import Header from '../../components/Header';
+import PageContainer from '../../components/PageContainer';
+import Pagination from '../../components/Pagination';
+import { useBreakpoint } from '../../hooks/useBreakpoint';
 import FrequencyBadge from '../../components/FrequencyBadge';
 import StatusBadge from '../../components/StatusBadge';
+import ExportScheduleModal from '../../components/ExportScheduleModal';
 import { colors, layout } from '../../theme';
 
 export default function ScheduleCalendarScreen({ navigation }) {
   const { user } = useAuth();
+  const { selectedSystem, setSelectedSystem } = useSystemFilter();
+  const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState('week'); // 'week' | 'month'
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
   const [selectedDayStr, setSelectedDayStr] = useState(formatDate(new Date()));
+  const [exportModalVisible, setExportModalVisible] = useState(false);
 
-  const [rules, setRules] = useState([]);
-  const [logs, setLogs] = useState([]);
-  const [tasks, setTasks] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  // Calculate range depending on view mode
+  const { rangeStart, rangeEnd } = React.useMemo(() => {
+    if (viewMode === 'month') {
+      const m = getMonthRange(currentDateStr);
+      return { rangeStart: m.start, rangeEnd: m.end };
+    } else {
+      const w = getWorkWeek(currentDateStr);
+      return { rangeStart: w.start, rangeEnd: w.end };
+    }
+  }, [viewMode, currentDateStr]);
+
+  // Query Schedule Rules (cached for 30s)
+  const {
+    data: rules = [],
+    isLoading: rulesLoading,
+    error: rulesError,
+    refetch: refetchRules,
+  } = useQuery({
+    queryKey: ['schedule_rules'],
+    queryFn: () => fetchScheduleRules(),
+    staleTime: 30 * 1000,
+  });
+
+  // Query Task Logs for visible range
+  const {
+    data: logs = [],
+    isLoading: logsLoading,
+    error: logsError,
+    refetch: refetchLogs,
+  } = useQuery({
+    queryKey: ['task_logs', rangeStart, rangeEnd],
+    queryFn: () => fetchTaskLogs(rangeStart, rangeEnd),
+    staleTime: 30 * 1000,
+  });
+
+  const loading = rulesLoading || logsLoading;
+  const error = rulesError?.message || logsError?.message || '';
+
+  // Realtime subscription for task_logs invalidation
+  useEffect(() => {
+    if (!isConfigured || !supabase?.channel) return;
+
+    const channel = supabase
+      .channel(`task_logs_${rangeStart}_${rangeEnd}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'task_logs' },
+        () => {
+          // Invalidate task logs query debounced
+          queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [rangeStart, rangeEnd, queryClient]);
+
+  // Expand due tasks with useMemo, filtered by selectedSystem if not 'ALL'
+  const tasks = React.useMemo(() => {
+    if (!rules || rules.length === 0) return [];
+    const allDueTasks = buildDueTasks(rules, logs, rangeStart, rangeEnd);
+    if (!selectedSystem || selectedSystem === 'ALL') {
+      return allDueTasks;
+    }
+    return allDueTasks.filter((t) => {
+      const code = t.category?.code || t.equipment?.group?.category?.code || t.equipment?.groups?.categories?.code || t.categoryCode;
+      return code === selectedSystem;
+    });
+  }, [rules, logs, rangeStart, rangeEnd, selectedSystem]);
+
+  const loadData = useCallback(() => {
+    refetchRules();
+    refetchLogs();
+  }, [refetchRules, refetchLogs]);
 
   // Edit Rule Modal State
   const [editModalVisible, setEditModalVisible] = useState(false);
@@ -56,43 +137,6 @@ export default function ScheduleCalendarScreen({ navigation }) {
   const [editWeekday, setEditWeekday] = useState(1);
   const [editNotes, setEditNotes] = useState('');
   const [modalSaving, setModalSaving] = useState(false);
-
-  const loadData = useCallback(async () => {
-    try {
-      setLoading(true);
-      setError('');
-      // Load range depending on view mode
-      let rangeStart, rangeEnd;
-      if (viewMode === 'month') {
-        const m = getMonthRange(currentDateStr);
-        rangeStart = m.start;
-        rangeEnd = m.end;
-      } else {
-        const w = getWorkWeek(currentDateStr);
-        rangeStart = w.start;
-        rangeEnd = w.end;
-      }
-
-      const [loadedRules, loadedLogs] = await Promise.all([
-        fetchScheduleRules(),
-        fetchTaskLogs(rangeStart, rangeEnd),
-      ]);
-
-      setRules(loadedRules);
-      setLogs(loadedLogs);
-
-      const computed = buildDueTasks(loadedRules, loadedLogs, rangeStart, rangeEnd);
-      setTasks(computed);
-    } catch (err) {
-      setError(err.message || 'Failed to load schedule rules and task logs.');
-    } finally {
-      setLoading(false);
-    }
-  }, [viewMode, currentDateStr]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
 
   // Navigate dates
   const handlePrev = () => {
@@ -148,7 +192,7 @@ export default function ScheduleCalendarScreen({ navigation }) {
         notes: editNotes.trim() ? editNotes.trim() : null,
       });
       setEditModalVisible(false);
-      await loadData();
+      queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
     } catch (err) {
       alert(err.message || 'Failed to update rule.');
     } finally {
@@ -166,7 +210,7 @@ export default function ScheduleCalendarScreen({ navigation }) {
 
     try {
       await deleteScheduleRule(ruleId);
-      await loadData();
+      queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
     } catch (err) {
       alert(err.message || 'Failed to delete rule.');
     }
@@ -357,17 +401,29 @@ export default function ScheduleCalendarScreen({ navigation }) {
         subtitle={`Week ${weekNum} • ${monthInfo.monthName} ${monthInfo.year}`}
         navigation={navigation}
         rightAction={
-          <TouchableOpacity
-            style={styles.newRuleBtn}
-            onPress={() => navigation.navigate('SetSchedule')}
-          >
-            <Ionicons name="add" size={18} color={colors.white} />
-            <Text style={styles.newRuleText}>Add Rule</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {Platform.OS === 'web' && user?.role === 'admin' && (
+              <TouchableOpacity
+                style={styles.exportExcelBtn}
+                onPress={() => setExportModalVisible(true)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name="download-outline" size={17} color={colors.primary} />
+                <Text style={styles.exportExcelText}>Export Excel</Text>
+              </TouchableOpacity>
+            )}
+            <TouchableOpacity
+              style={styles.newRuleBtn}
+              onPress={() => navigation.navigate('SetSchedule')}
+            >
+              <Ionicons name="add" size={18} color={colors.white} />
+              <Text style={styles.newRuleText}>Add Rule</Text>
+            </TouchableOpacity>
+          </View>
         }
       />
 
-      <ScrollView contentContainerStyle={styles.content}>
+      <PageContainer>
         {/* Inline Error Banner */}
         {error ? (
           <View style={styles.errorBanner}>
@@ -447,7 +503,22 @@ export default function ScheduleCalendarScreen({ navigation }) {
           {selectedDayTasks.length === 0 ? (
             <View style={styles.emptyDayBox}>
               <Ionicons name="calendar-clear-outline" size={32} color={colors.textMuted} />
-              <Text style={styles.emptyDayText}>No tasks scheduled for {selectedDayStr}</Text>
+              {selectedSystem && selectedSystem !== 'ALL' ? (
+                <>
+                  <Text style={styles.emptyDayText}>
+                    No tasks for System {selectedSystem} on this day.
+                  </Text>
+                  <TouchableOpacity
+                    style={styles.clearFilterBtn}
+                    onPress={() => setSelectedSystem('ALL')}
+                    activeOpacity={0.8}
+                  >
+                    <Text style={styles.clearFilterBtnText}>Clear filter</Text>
+                  </TouchableOpacity>
+                </>
+              ) : (
+                <Text style={styles.emptyDayText}>No tasks scheduled for {selectedDayStr}</Text>
+              )}
             </View>
           ) : (
             selectedDayTasks.map((t) => (
@@ -612,7 +683,14 @@ export default function ScheduleCalendarScreen({ navigation }) {
             </View>
           </View>
         </Modal>
-      </ScrollView>
+
+        {/* Export to Excel Modal */}
+        <ExportScheduleModal
+          visible={exportModalVisible}
+          onClose={() => setExportModalVisible(false)}
+          initialPeriodType={viewMode}
+        />
+      </PageContainer>
     </View>
   );
 }
@@ -623,11 +701,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   content: {
-    padding: 16,
-    maxWidth: 1000,
-    width: '100%',
-    alignSelf: 'center',
     paddingBottom: 40,
+    width: '100%',
   },
   errorBanner: {
     flexDirection: 'row',
@@ -671,6 +746,22 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: '#475569',
     fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
+  },
+  exportExcelBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+    gap: 6,
+  },
+  exportExcelText: {
+    color: colors.primary,
+    fontWeight: '700',
+    fontSize: 12,
   },
   newRuleBtn: {
     flexDirection: 'row',
@@ -934,6 +1025,18 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+  clearFilterBtn: {
+    marginTop: 10,
+    backgroundColor: colors.primary,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  clearFilterBtnText: {
+    color: colors.white,
+    fontSize: 12,
+    fontWeight: '700',
+  },
   emptyDayText: {
     marginTop: 8,
     fontSize: 14,
@@ -1099,6 +1202,297 @@ const styles = StyleSheet.create({
   modalSaveText: {
     color: colors.white,
     fontWeight: '700',
+  },
+  // Two-Column Responsive Layout
+  twoColContainer: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 20,
+    marginTop: 8,
+    width: '100%',
+  },
+  twoColStacked: {
+    flexDirection: 'column',
+    gap: 16,
+  },
+  tasksCol: {
+    width: '100%',
+  },
+  overviewCol: {
+    width: '100%',
+  },
+  tasksGrid: {
+    flexDirection: 'column',
+    gap: 8,
+  },
+  tasksGridXl: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  compactTaskCard: {
+    backgroundColor: colors.white,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    minHeight: 64,
+  },
+  compactTaskCardXl: {
+    width: '49.2%',
+  },
+  cardLeftCol: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardCenterCol: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  cardEqName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.dark,
+    marginBottom: 2,
+  },
+  cardBreadcrumb: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '500',
+  },
+  cardInlineNote: {
+    fontSize: 10,
+    color: colors.primaryDark,
+    backgroundColor: colors.primaryVeryLight,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    alignSelf: 'flex-start',
+    marginTop: 4,
+  },
+  cardRightCol: {
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  compactActionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  compactActionBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 6,
+    backgroundColor: colors.primaryVeryLight,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  compactActionDelete: {
+    backgroundColor: '#FEE2E2',
+  },
+  tasksPagination: {
+    marginTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderLight,
+    paddingTop: 8,
+  },
+  // Day Overview Panel Card
+  overviewCard: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+  },
+  overviewHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 14,
+    paddingBottom: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
+  },
+  overviewTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  overviewTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: colors.dark,
+    letterSpacing: 0.3,
+  },
+  overviewDateText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  metricsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+    gap: 6,
+  },
+  metricItem: {
+    flex: 1,
+    backgroundColor: colors.background,
+    borderRadius: 8,
+    paddingVertical: 8,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.borderLight,
+  },
+  metricItemDone: {
+    backgroundColor: 'rgba(16, 185, 129, 0.08)',
+    borderColor: 'rgba(16, 185, 129, 0.2)',
+  },
+  metricItemPending: {
+    backgroundColor: 'rgba(14, 165, 233, 0.08)',
+    borderColor: 'rgba(14, 165, 233, 0.2)',
+  },
+  metricItemOverdue: {
+    backgroundColor: 'rgba(239, 68, 68, 0.08)',
+    borderColor: 'rgba(239, 68, 68, 0.2)',
+  },
+  metricVal: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.dark,
+  },
+  metricLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  progSection: {
+    marginBottom: 14,
+  },
+  progHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  progLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  progPercent: {
+    fontSize: 12,
+    fontWeight: '800',
+    color: colors.primary,
+  },
+  progTrack: {
+    height: 6,
+    backgroundColor: '#E4E4E7',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progFill: {
+    height: '100%',
+    backgroundColor: colors.primary,
+    borderRadius: 3,
+  },
+  breakdownSection: {
+    marginBottom: 12,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderLight,
+  },
+  breakdownTitle: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: colors.textMuted,
+    letterSpacing: 0.8,
+    marginBottom: 8,
+  },
+  sysRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  sysRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  sysDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    marginRight: 6,
+  },
+  sysName: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.dark,
+    flex: 1,
+  },
+  sysRowRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    width: 80,
+  },
+  sysBarTrack: {
+    flex: 1,
+    height: 4,
+    backgroundColor: '#E4E4E7',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  sysBarFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  sysCountText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.dark,
+    minWidth: 16,
+    textAlign: 'right',
+  },
+  freqBadgeGrid: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  freqBadgeItem: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  freqCountText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.dark,
+  },
+  quickAddRuleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(14, 165, 233, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(14, 165, 233, 0.3)',
+    borderRadius: 8,
+    paddingVertical: 9,
+    marginTop: 6,
+  },
+  quickAddRuleText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primaryDark,
   },
 });
 

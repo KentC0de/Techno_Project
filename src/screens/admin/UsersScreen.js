@@ -1,148 +1,550 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
-  ScrollView,
   TouchableOpacity,
   StyleSheet,
   ActivityIndicator,
+  TextInput,
+  Modal,
+  Alert,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '../../context/AuthContext';
+import { supabase, isConfigured } from '../../lib/supabase';
 import { fetchProfiles, updateProfileRole } from '../../lib/dataService';
 import Header from '../../components/Header';
-import { colors, layout } from '../../theme';
+import PageContainer from '../../components/PageContainer';
+import { useBreakpoint } from '../../hooks/useBreakpoint';
+import { colors } from '../../theme';
 
 export default function UsersScreen({ navigation }) {
   const { user: currentUser } = useAuth();
-  const [profiles, setProfiles] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const { isDesktop, isSm } = useBreakpoint();
+
+  // Active vs Archived Tabs
+  const [activeTab, setActiveTab] = useState('active'); // 'active' | 'archived'
+  const [searchQuery, setSearchQuery] = useState('');
+  const [roleFilter, setRoleFilter] = useState('all'); // 'all' | 'admin' | 'worker'
+
+  // Updating role state
   const [updatingId, setUpdatingId] = useState(null);
-  const [message, setMessage] = useState('');
+  const [toastMessage, setToastMessage] = useState('');
+  const [toastType, setToastType] = useState('success'); // 'success' | 'error'
 
-  const loadData = useCallback(async () => {
-    try {
-      setLoading(true);
-      const data = await fetchProfiles();
-      setProfiles(data);
-    } catch (err) {
-      console.warn('Error fetching profiles:', err);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  // Disable account modal
+  const [disableModalVisible, setDisableModalVisible] = useState(false);
+  const [targetUser, setTargetUser] = useState(null);
+  const [disableReason, setDisableReason] = useState('');
+  const [actionLoading, setActionLoading] = useState(false);
 
+  const showToast = (msg, type = 'success') => {
+    setToastMessage(msg);
+    setToastType(type);
+    setTimeout(() => setToastMessage(''), 4500);
+  };
+
+  // Query profiles (staleTime 30s)
+  const {
+    data: profiles = [],
+    isLoading: loading,
+    refetch,
+  } = useQuery({
+    queryKey: ['profiles'],
+    queryFn: fetchProfiles,
+    staleTime: 30 * 1000,
+  });
+
+  // Realtime subscription on profiles
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    if (!isConfigured || !supabase?.channel) return;
 
-  const handleToggleRole = async (profile) => {
-    const nextRole = profile.role === 'admin' ? 'worker' : 'admin';
-    try {
-      setUpdatingId(profile.id);
-      await updateProfileRole(profile.id, nextRole);
-      setMessage(`Updated ${profile.full_name}'s role to ${nextRole.toUpperCase()}`);
-      await loadData();
-      setTimeout(() => setMessage(''), 4000);
-    } catch (err) {
-      alert(err.message || 'Failed to update user role.');
-    } finally {
+    const channel = supabase
+      .channel('admin_users_realtime')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'profiles' },
+        () => {
+          queryClient.invalidateQueries({ queryKey: ['profiles'] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
+
+  // Role toggle mutation
+  const updateRoleMutation = useMutation({
+    mutationFn: ({ id, nextRole }) => updateProfileRole(id, nextRole),
+    onSuccess: (data, variables) => {
+      queryClient.invalidateQueries({ queryKey: ['profiles'] });
+      showToast(`Role updated to ${variables.nextRole.toUpperCase()}`);
+    },
+    onError: (err) => {
+      showToast(err.message || 'Failed to update role.', 'error');
+    },
+    onSettled: () => {
       setUpdatingId(null);
+    },
+  });
+
+  const handleToggleRole = (profile) => {
+    if (profile.id === currentUser?.id) {
+      showToast('You cannot change your own role.', 'error');
+      return;
+    }
+    const nextRole = profile.role === 'admin' ? 'worker' : 'admin';
+    setUpdatingId(profile.id);
+    updateRoleMutation.mutate({ id: profile.id, nextRole });
+  };
+
+  // Open Disable Modal
+  const openDisableModal = (profile) => {
+    if (profile.id === currentUser?.id) {
+      showToast('You cannot disable your own administrator account.', 'error');
+      return;
+    }
+    if (profile.role === 'admin') {
+      showToast('Administrator accounts cannot be disabled directly.', 'error');
+      return;
+    }
+    setTargetUser(profile);
+    setDisableReason('');
+    setDisableModalVisible(true);
+  };
+
+  // Execute Disable via RPC admin_set_user_status
+  const handleConfirmDisable = async () => {
+    if (!targetUser) return;
+    try {
+      setActionLoading(true);
+      const { error: rpcErr } = await supabase.rpc('admin_set_user_status', {
+        target: targetUser.id,
+        new_status: 'disabled',
+        reason: disableReason.trim() || null,
+      });
+
+      if (rpcErr) {
+        if (rpcErr.message?.includes('function') || rpcErr.code === '42883') {
+          showToast('Run the settings SQL in Supabase to enable account management.', 'error');
+        } else {
+          showToast(rpcErr.message || 'Failed to disable user account.', 'error');
+        }
+        return;
+      }
+
+      setDisableModalVisible(false);
+      queryClient.invalidateQueries({ queryKey: ['profiles'] });
+      showToast(`${targetUser.full_name || 'Worker'} deactivated and moved to Archived.`);
+    } catch (err) {
+      showToast(err.message || 'An unexpected error occurred.', 'error');
+    } finally {
+      setActionLoading(false);
     }
   };
+
+  // Execute Restore via RPC
+  const handleRestoreUser = async (profile) => {
+    const confirmed =
+      Platform.OS === 'web' && typeof window !== 'undefined'
+        ? window.confirm(`Restore ${profile.full_name || 'this worker'}? They will be allowed to log in again.`)
+        : true;
+
+    if (!confirmed) return;
+
+    try {
+      setActionLoading(true);
+      const { error: rpcErr } = await supabase.rpc('admin_set_user_status', {
+        target: profile.id,
+        new_status: 'active',
+        reason: null,
+      });
+
+      if (rpcErr) {
+        if (rpcErr.message?.includes('function') || rpcErr.code === '42883') {
+          showToast('Run the settings SQL in Supabase to enable account management.', 'error');
+        } else {
+          showToast(rpcErr.message || 'Failed to restore user account.', 'error');
+        }
+        return;
+      }
+
+      queryClient.invalidateQueries({ queryKey: ['profiles'] });
+      showToast(`${profile.full_name || 'Worker'} restored to Active accounts.`);
+    } catch (err) {
+      showToast(err.message || 'An unexpected error occurred.', 'error');
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  // Split Active vs Archived
+  const activeProfiles = useMemo(
+    () => profiles.filter((p) => (p.status || 'active') !== 'disabled'),
+    [profiles]
+  );
+
+  const archivedProfiles = useMemo(
+    () => profiles.filter((p) => p.status === 'disabled'),
+    [profiles]
+  );
+
+  // Filtered by tab, search, role
+  const displayList = useMemo(() => {
+    const source = activeTab === 'active' ? activeProfiles : archivedProfiles;
+    return source.filter((p) => {
+      // Search filter
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const nameMatch = (p.full_name || '').toLowerCase().includes(q);
+        const emailMatch = (p.email || '').toLowerCase().includes(q);
+        if (!nameMatch && !emailMatch) return false;
+      }
+      // Role filter
+      if (roleFilter !== 'all' && p.role !== roleFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [activeTab, activeProfiles, archivedProfiles, searchQuery, roleFilter]);
 
   return (
     <View style={styles.screen}>
       <Header
-        title="User Roles"
-        subtitle="Manage administrator and field worker permissions"
+        title="User Roles & Access"
+        subtitle="Manage administrator access, field worker roles, and account status"
         navigation={navigation}
       />
 
-      <ScrollView contentContainerStyle={styles.content}>
-        {message ? (
-          <View style={styles.messageBanner}>
-            <Ionicons name="checkmark-circle" size={18} color="#059669" />
-            <Text style={styles.messageText}>{message}</Text>
+      <PageContainer>
+        {/* Toast / Alert Message */}
+        {toastMessage ? (
+          <View
+            style={[
+              styles.toastBanner,
+              toastType === 'error' ? styles.toastError : styles.toastSuccess,
+            ]}
+          >
+            <Ionicons
+              name={toastType === 'error' ? 'alert-circle' : 'checkmark-circle'}
+              size={18}
+              color={toastType === 'error' ? '#EF4444' : '#10B981'}
+            />
+            <Text
+              style={[
+                styles.toastText,
+                toastType === 'error' ? styles.toastErrorText : styles.toastSuccessText,
+              ]}
+            >
+              {toastMessage}
+            </Text>
           </View>
         ) : null}
 
-        <View style={styles.infoBox}>
-          <Ionicons name="shield-checkmark-outline" size={20} color={colors.primaryDark} style={{ marginRight: 8 }} />
-          <Text style={styles.infoText}>
-            Admins have permission to configure equipment, create schedule rules, and analyze performance reports. Field workers have streamlined access to mark maintenance tasks.
-          </Text>
+        {/* Tab Selector & Controls Bar */}
+        <View style={styles.controlsBar}>
+          {/* Active / Archived Tabs */}
+          <View style={styles.tabGroup}>
+            <TouchableOpacity
+              style={[styles.tabBtn, activeTab === 'active' && styles.tabBtnActive]}
+              onPress={() => setActiveTab('active')}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.tabLabel, activeTab === 'active' && styles.tabLabelActive]}>
+                Active
+              </Text>
+              <View
+                style={[
+                  styles.tabBadge,
+                  activeTab === 'active' && styles.tabBadgeActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.tabBadgeText,
+                    activeTab === 'active' && styles.tabBadgeTextActive,
+                  ]}
+                >
+                  {activeProfiles.length}
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.tabBtn, activeTab === 'archived' && styles.tabBtnActive]}
+              onPress={() => setActiveTab('archived')}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.tabLabel, activeTab === 'archived' && styles.tabLabelActive]}>
+                Archived
+              </Text>
+              <View
+                style={[
+                  styles.tabBadge,
+                  activeTab === 'archived' && styles.tabBadgeActive,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.tabBadgeText,
+                    activeTab === 'archived' && styles.tabBadgeTextActive,
+                  ]}
+                >
+                  {archivedProfiles.length}
+                </Text>
+              </View>
+            </TouchableOpacity>
+          </View>
+
+          {/* Filters: Search & Role Picker */}
+          <View style={styles.filterGroup}>
+            <View style={styles.searchBox}>
+              <Ionicons name="search" size={16} color={colors.textMuted} />
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Search name or email..."
+                placeholderTextColor={colors.textMuted}
+                value={searchQuery}
+                onChangeText={setSearchQuery}
+              />
+              {searchQuery ? (
+                <TouchableOpacity onPress={() => setSearchQuery('')}>
+                  <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+                </TouchableOpacity>
+              ) : null}
+            </View>
+
+            <View style={styles.rolePickerRow}>
+              {['all', 'admin', 'worker'].map((r) => (
+                <TouchableOpacity
+                  key={r}
+                  style={[styles.roleFilterBtn, roleFilter === r && styles.roleFilterBtnActive]}
+                  onPress={() => setRoleFilter(r)}
+                >
+                  <Text
+                    style={[
+                      styles.roleFilterText,
+                      roleFilter === r && styles.roleFilterTextActive,
+                    ]}
+                  >
+                    {r.toUpperCase()}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
         </View>
 
+        {/* Content Table / Cards */}
         {loading ? (
-          <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 32 }} />
+          <ActivityIndicator size="large" color={colors.primary} style={{ marginTop: 40 }} />
+        ) : displayList.length === 0 ? (
+          <View style={styles.emptyCard}>
+            <Ionicons
+              name={activeTab === 'active' ? 'people-outline' : 'archive-outline'}
+              size={40}
+              color={colors.textMuted}
+            />
+            <Text style={styles.emptyTitle}>
+              {activeTab === 'active' ? 'No active users found' : 'No archived accounts'}
+            </Text>
+            <Text style={styles.emptySub}>
+              {searchQuery
+                ? 'Try clearing the search or role filter.'
+                : activeTab === 'archived'
+                ? 'Deactivated accounts will appear here for audit and restoration.'
+                : 'No users currently match the selected criteria.'}
+            </Text>
+          </View>
         ) : (
-          <View style={styles.userList}>
-            {profiles.map((p) => {
+          <View style={styles.usersList}>
+            {displayList.map((p) => {
               const isMe = p.id === currentUser?.id;
               const isAdmin = p.role === 'admin';
+              const isArchived = p.status === 'disabled';
+
               return (
-                <View key={p.id} style={styles.userCard}>
-                  <View style={styles.userLeft}>
+                <View key={p.id} style={[styles.userCard, isArchived && styles.userCardArchived]}>
+                  {/* Left: Avatar + Details */}
+                  <View style={styles.userCardLeft}>
                     <View
                       style={[
                         styles.avatar,
                         isAdmin ? styles.avatarAdmin : styles.avatarWorker,
+                        isArchived && styles.avatarArchived,
                       ]}
                     >
                       <Ionicons
-                        name={isAdmin ? 'shield-outline' : 'person-outline'}
-                        size={20}
+                        name={isArchived ? 'lock-closed' : isAdmin ? 'shield' : 'person'}
+                        size={18}
                         color={colors.white}
                       />
                     </View>
 
                     <View style={styles.userMeta}>
                       <View style={styles.nameRow}>
-                        <Text style={styles.fullName}>{p.full_name || 'User'}</Text>
+                        <Text style={styles.fullName}>{p.full_name || 'Unnamed User'}</Text>
                         {isMe && (
                           <View style={styles.youBadge}>
                             <Text style={styles.youText}>You</Text>
                           </View>
                         )}
+                        <View
+                          style={[
+                            styles.roleChip,
+                            isAdmin ? styles.roleChipAdmin : styles.roleChipWorker,
+                          ]}
+                        >
+                          <Text
+                            style={[
+                              styles.roleChipText,
+                              isAdmin ? styles.roleChipTextAdmin : styles.roleChipTextWorker,
+                            ]}
+                          >
+                            {p.role.toUpperCase()}
+                          </Text>
+                        </View>
                       </View>
-                      <Text style={styles.userRoleText}>
-                        Role: <Text style={{ fontWeight: '700', color: colors.dark }}>{p.role}</Text>
-                        {p.created_at ? ` • Added ${p.created_at.slice(0, 10)}` : ''}
-                      </Text>
+
+                      <Text style={styles.emailText}>{p.email || 'No email registered'}</Text>
+
+                      {/* Archived details row */}
+                      {isArchived ? (
+                        <View style={styles.archivedMetaBox}>
+                          <Text style={styles.archivedReasonText}>
+                            Deactivated: {p.disabled_at ? p.disabled_at.slice(0, 10) : 'Recently'}
+                            {p.disabled_reason ? ` • Reason: "${p.disabled_reason}"` : ''}
+                          </Text>
+                        </View>
+                      ) : (
+                        <Text style={styles.createdText}>
+                          Active • Joined {p.created_at ? p.created_at.slice(0, 10) : 'recently'}
+                        </Text>
+                      )}
                     </View>
                   </View>
 
-                  <TouchableOpacity
-                    style={[
-                      styles.roleToggleBtn,
-                      isAdmin ? styles.btnAdmin : styles.btnWorker,
-                    ]}
-                    onPress={() => handleToggleRole(p)}
-                    disabled={updatingId === p.id}
-                  >
-                    {updatingId === p.id ? (
-                      <ActivityIndicator size="small" color={colors.white} />
-                    ) : (
+                  {/* Right: Actions */}
+                  <View style={styles.userCardActions}>
+                    {!isArchived ? (
                       <>
-                        <Ionicons
-                          name="swap-horizontal"
-                          size={14}
-                          color={colors.white}
-                          style={{ marginRight: 4 }}
-                        />
-                        <Text style={styles.roleToggleBtnText}>
-                          Make {isAdmin ? 'Worker' : 'Admin'}
-                        </Text>
+                        {/* Change Role Button (disabled for yourself) */}
+                        <TouchableOpacity
+                          style={[
+                            styles.actionBtn,
+                            styles.roleSwitchBtn,
+                            isMe && styles.actionBtnDisabled,
+                          ]}
+                          onPress={() => handleToggleRole(p)}
+                          disabled={isMe || updatingId === p.id}
+                          title={isMe ? 'You cannot change your own role' : undefined}
+                        >
+                          {updatingId === p.id ? (
+                            <ActivityIndicator size="small" color={colors.primaryDark} />
+                          ) : (
+                            <>
+                              <Ionicons name="swap-horizontal" size={14} color={colors.primaryDark} />
+                              <Text style={styles.roleSwitchText}>
+                                Make {isAdmin ? 'Worker' : 'Admin'}
+                              </Text>
+                            </>
+                          )}
+                        </TouchableOpacity>
+
+                        {/* Disable button (only for workers, never for admins or yourself) */}
+                        {!isAdmin && (
+                          <TouchableOpacity
+                            style={[styles.actionBtn, styles.disableBtn]}
+                            onPress={() => openDisableModal(p)}
+                            activeOpacity={0.8}
+                          >
+                            <Ionicons name="ban-outline" size={14} color="#EF4444" />
+                            <Text style={styles.disableBtnText}>Disable</Text>
+                          </TouchableOpacity>
+                        )}
                       </>
+                    ) : (
+                      /* Restore Button for Archived workers */
+                      <TouchableOpacity
+                        style={[styles.actionBtn, styles.restoreBtn]}
+                        onPress={() => handleRestoreUser(p)}
+                        activeOpacity={0.8}
+                      >
+                        <Ionicons name="refresh-outline" size={14} color="#10B981" />
+                        <Text style={styles.restoreBtnText}>Restore Account</Text>
+                      </TouchableOpacity>
                     )}
-                  </TouchableOpacity>
+                  </View>
                 </View>
               );
             })}
           </View>
         )}
-      </ScrollView>
+
+        {/* Modal: Disable Worker Confirmation */}
+        <Modal
+          visible={disableModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setDisableModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={styles.modalTitleRow}>
+                  <Ionicons name="warning" size={22} color="#EF4444" />
+                  <Text style={styles.modalTitle}>Disable Worker Account</Text>
+                </View>
+                <TouchableOpacity onPress={() => setDisableModalVisible(false)}>
+                  <Ionicons name="close" size={20} color={colors.textDark} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.modalBodyText}>
+                <Text style={{ fontWeight: '700' }}>{targetUser?.full_name || 'This user'}</Text>{' '}
+                will be logged out immediately and blocked from logging in. You can restore this account at any time from the Archived tab.
+              </Text>
+
+              <Text style={styles.modalFieldLabel}>Reason for deactivation (optional):</Text>
+              <TextInput
+                style={styles.modalReasonInput}
+                placeholder="e.g. End of contract, safety incident, transferred..."
+                placeholderTextColor={colors.textMuted}
+                value={disableReason}
+                onChangeText={setDisableReason}
+                multiline
+              />
+
+              <View style={styles.modalBtnRow}>
+                <TouchableOpacity
+                  style={styles.modalCancelBtn}
+                  onPress={() => setDisableModalVisible(false)}
+                  disabled={actionLoading}
+                >
+                  <Text style={styles.modalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.modalDisableBtn}
+                  onPress={handleConfirmDisable}
+                  disabled={actionLoading}
+                >
+                  {actionLoading ? (
+                    <ActivityIndicator size="small" color={colors.white} />
+                  ) : (
+                    <Text style={styles.modalDisableBtnText}>Disable Account</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      </PageContainer>
     </View>
   );
 }
@@ -152,78 +554,181 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-  content: {
-    padding: 16,
-    maxWidth: 900,
-    width: '100%',
-    alignSelf: 'center',
-    paddingBottom: 40,
-  },
-  messageBanner: {
+  toastBanner: {
     flexDirection: 'row',
     alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+    marginBottom: 16,
+    gap: 8,
+    borderWidth: 1,
+  },
+  toastSuccess: {
     backgroundColor: '#ECFDF5',
-    borderColor: '#6EE7B7',
-    borderWidth: 1,
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 16,
+    borderColor: '#A7F3D0',
   },
-  messageText: {
+  toastSuccessText: {
     color: '#065F46',
-    fontWeight: '700',
-    fontSize: 14,
-    marginLeft: 8,
-  },
-  infoBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.primaryVeryLight,
-    borderWidth: 1,
-    borderColor: colors.primaryLight,
-    padding: 14,
-    borderRadius: 12,
-    marginBottom: 16,
-  },
-  infoText: {
     fontSize: 13,
-    color: colors.primaryDark,
-    lineHeight: 18,
-    flex: 1,
+    fontWeight: '600',
   },
-  userList: {
-    gap: 10,
+  toastError: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
   },
-  userCard: {
+  toastErrorText: {
+    color: '#991B1B',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  controlsBar: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
     backgroundColor: colors.white,
-    padding: 16,
+    padding: 12,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: colors.border,
-    minHeight: layout.minTouchTarget,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+    gap: 12,
   },
-  userLeft: {
+  tabGroup: {
+    flexDirection: 'row',
+    backgroundColor: colors.background,
+    borderRadius: 8,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  tabBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 6,
+    gap: 6,
+  },
+  tabBtnActive: {
+    backgroundColor: colors.dark,
+  },
+  tabLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  tabLabelActive: {
+    color: colors.white,
+  },
+  tabBadge: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+    backgroundColor: '#E4E4E7',
+  },
+  tabBadgeActive: {
+    backgroundColor: '#27272A',
+  },
+  tabBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: colors.textDark,
+  },
+  tabBadgeTextActive: {
+    color: colors.white,
+  },
+  filterGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  searchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    height: 36,
+    gap: 6,
+    minWidth: 200,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 12,
+    color: colors.textDark,
+  },
+  rolePickerRow: {
+    flexDirection: 'row',
+    backgroundColor: colors.background,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 2,
+  },
+  roleFilterBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  roleFilterBtnActive: {
+    backgroundColor: colors.primary,
+  },
+  roleFilterText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  roleFilterTextActive: {
+    color: colors.white,
+  },
+  usersList: {
+    flexDirection: 'column',
+    gap: 10,
+  },
+  userCard: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 12,
+  },
+  userCardArchived: {
+    backgroundColor: '#FAFAFA',
+    borderColor: '#E4E4E7',
+    opacity: 0.88,
+  },
+  userCardLeft: {
     flexDirection: 'row',
     alignItems: 'center',
     flex: 1,
-    marginRight: 10,
+    minWidth: 260,
+    gap: 12,
   },
   avatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 21,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 12,
   },
   avatarAdmin: {
-    backgroundColor: colors.dark,
+    backgroundColor: colors.primary,
   },
   avatarWorker: {
-    backgroundColor: colors.primary,
+    backgroundColor: colors.dark,
+  },
+  avatarArchived: {
+    backgroundColor: '#71717A',
   },
   userMeta: {
     flex: 1,
@@ -231,49 +736,208 @@ const styles = StyleSheet.create({
   nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    gap: 8,
+    flexWrap: 'wrap',
   },
   fullName: {
     fontSize: 15,
-    fontWeight: '800',
-    color: colors.dark,
+    fontWeight: '700',
+    color: colors.textDark,
   },
   youBadge: {
-    backgroundColor: colors.primaryVeryLight,
+    backgroundColor: 'rgba(14, 165, 233, 0.12)',
     paddingHorizontal: 6,
-    paddingVertical: 1,
+    paddingVertical: 2,
     borderRadius: 4,
-    borderWidth: 1,
-    borderColor: colors.primaryLight,
   },
   youText: {
     fontSize: 10,
     fontWeight: '800',
+    color: colors.primary,
+  },
+  roleChip: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  roleChipAdmin: {
+    backgroundColor: 'rgba(14, 165, 233, 0.1)',
+  },
+  roleChipWorker: {
+    backgroundColor: '#F4F4F5',
+  },
+  roleChipText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  roleChipTextAdmin: {
     color: colors.primaryDark,
   },
-  userRoleText: {
+  roleChipTextWorker: {
+    color: '#52525B',
+  },
+  emailText: {
     fontSize: 12,
     color: colors.textSecondary,
     marginTop: 2,
   },
-  roleToggleBtn: {
+  createdText: {
+    fontSize: 11,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  archivedMetaBox: {
+    marginTop: 4,
+  },
+  archivedReasonText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#DC2626',
+  },
+  userCardActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 8,
+  },
+  actionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 7,
     paddingHorizontal: 12,
-    paddingVertical: 8,
     borderRadius: 8,
-    minHeight: 40,
+    borderWidth: 1,
   },
-  btnAdmin: {
-    backgroundColor: colors.textSecondary,
+  actionBtnDisabled: {
+    opacity: 0.4,
   },
-  btnWorker: {
-    backgroundColor: colors.primary,
+  roleSwitchBtn: {
+    backgroundColor: colors.primaryVeryLight,
+    borderColor: 'rgba(14, 165, 233, 0.25)',
   },
-  roleToggleBtnText: {
-    color: colors.white,
+  roleSwitchText: {
     fontSize: 12,
     fontWeight: '700',
+    color: colors.primaryDark,
+  },
+  disableBtn: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+  },
+  disableBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#EF4444',
+  },
+  restoreBtn: {
+    backgroundColor: '#ECFDF5',
+    borderColor: '#A7F3D0',
+  },
+  restoreBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#10B981',
+  },
+  emptyCard: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    padding: 36,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.textDark,
+    marginTop: 10,
+  },
+  emptySub: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  // Modal styles
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  modalContent: {
+    width: '100%',
+    maxWidth: 460,
+    backgroundColor: colors.white,
+    borderRadius: 16,
+    padding: 20,
+  },
+  modalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  modalTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  modalTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.textDark,
+  },
+  modalBodyText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    lineHeight: 18,
+    marginBottom: 16,
+  },
+  modalFieldLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textDark,
+    marginBottom: 6,
+  },
+  modalReasonInput: {
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    padding: 10,
+    fontSize: 12,
+    color: colors.textDark,
+    minHeight: 70,
+    textAlignVertical: 'top',
+    marginBottom: 18,
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  modalCancelBtn: {
+    paddingVertical: 9,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+  },
+  modalCancelText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  modalDisableBtn: {
+    paddingVertical: 9,
+    paddingHorizontal: 18,
+    borderRadius: 8,
+    backgroundColor: '#EF4444',
+  },
+  modalDisableBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.white,
   },
 });
-

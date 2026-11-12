@@ -5,6 +5,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase, isConfigured } from './supabase';
+import { getAuthRedirectUrl } from './authRedirect';
 import {
   INITIAL_CATEGORIES,
   INITIAL_GROUPS,
@@ -156,6 +157,11 @@ export async function signInWithRoleCheck(email, password, expectedRole) {
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
     const msg = error.message || '';
+    if (msg.includes('banned') || error.code === 'user_banned') {
+      const banErr = new Error('ACCOUNT_DISABLED');
+      banErr.code = 'ACCOUNT_DISABLED';
+      throw banErr;
+    }
     if (msg.includes('Invalid login credentials') || msg.includes('invalid_credentials')) {
       throw new Error('Wrong email or password');
     }
@@ -171,7 +177,7 @@ export async function signInWithRoleCheck(email, password, expectedRole) {
   // Fetch profiles row using maybeSingle() so missing profile doesn't crash silently
   const { data: profile, error: profileErr } = await supabase
     .from('profiles')
-    .select('id, full_name, role')
+    .select('id, full_name, role, status')
     .eq('id', data.user.id)
     .maybeSingle();
 
@@ -183,6 +189,13 @@ export async function signInWithRoleCheck(email, password, expectedRole) {
   if (!profile) {
     await supabase.auth.signOut();
     throw new Error('No profile found for this account. Ask the system owner to create it.');
+  }
+
+  if (profile.status === 'disabled') {
+    await supabase.auth.signOut();
+    const disErr = new Error('ACCOUNT_DISABLED');
+    disErr.code = 'ACCOUNT_DISABLED';
+    throw disErr;
   }
 
   const role = profile.role;
@@ -218,6 +231,7 @@ export async function signUp(email, password, fullName) {
         data: {
           full_name: fullName,
         },
+        emailRedirectTo: getAuthRedirectUrl('/auth/confirmed'),
       },
     });
     if (error) throw error;
@@ -294,10 +308,33 @@ export async function fetchGroups(categoryId = null) {
   }
 }
 
-export async function fetchEquipment(groupId = null) {
+export async function fetchEquipment(groupIdOrOptions = null) {
+  let groupId = null;
+  let activeOnly = false;
+  let includeRelations = true;
+
+  if (typeof groupIdOrOptions === 'string') {
+    groupId = groupIdOrOptions;
+    activeOnly = true;
+  } else if (groupIdOrOptions && typeof groupIdOrOptions === 'object') {
+    groupId = groupIdOrOptions.groupId || null;
+    activeOnly = groupIdOrOptions.activeOnly !== undefined ? groupIdOrOptions.activeOnly : false;
+    if (groupIdOrOptions.includeRelations !== undefined) {
+      includeRelations = groupIdOrOptions.includeRelations;
+    }
+  }
+
   if (isConfigured) {
-    let query = supabase.from('equipment').select('*').eq('is_active', true);
-    if (groupId) query = query.eq('group_id', groupId);
+    const selectQuery = includeRelations
+      ? '*, group:groups(*, category:categories(*))'
+      : '*';
+    let query = supabase.from('equipment').select(selectQuery);
+    if (activeOnly) {
+      query = query.eq('is_active', true);
+    }
+    if (groupId) {
+      query = query.eq('group_id', groupId);
+    }
     const { data, error } = await query;
     if (error) throw error;
     return data || [];
@@ -491,7 +528,13 @@ export async function upsertTaskLog(log) {
       .upsert(log, { onConflict: 'rule_id,due_date' })
       .select()
       .single();
-    if (error) throw error;
+    if (error) {
+      // Check for concurrent write conflict or permission notice
+      if (error.code === '23505' || error.message?.includes('duplicate key') || error.message?.includes('unique constraint')) {
+        throw new Error('Already completed by someone else');
+      }
+      throw error;
+    }
     return data;
   } else {
     await initializeMockDataIfNeeded();

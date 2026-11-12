@@ -34,7 +34,9 @@ export default function WorkerLoginScreen({ navigation }) {
       await signInWithRoleCheck(email.trim().toLowerCase(), password, 'worker');
       // AuthContext sets user → AppNavigator redirects to WorkerRoot automatically
     } catch (err) {
-      setError(err.message || 'Sign in failed. Please try again.');
+      if (err.message !== 'ACCOUNT_DISABLED' && err.code !== 'ACCOUNT_DISABLED') {
+        setError(err.message || 'Sign in failed. Please try again.');
+      }
     } finally {
       setLoading(false);
     }

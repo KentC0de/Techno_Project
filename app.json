@@ -4,7 +4,11 @@
     "slug": "preventive-maintenance-scheduler",
     "version": "1.0.0",
     "orientation": "default",
+    "scheme": "solarpm",
     "userInterfaceStyle": "light",
+    "android": {
+      "package": "com.solarpm.hub"
+    },
     "web": {
       "bundler": "metro"
     },

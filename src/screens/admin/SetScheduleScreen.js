@@ -7,27 +7,42 @@ import {
   TextInput,
   StyleSheet,
   ActivityIndicator,
-  Alert,
+  Switch,
+  Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { supabase, isConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import {
   fetchCategories,
   fetchGroups,
   fetchEquipment,
-  createScheduleRules,
 } from '../../lib/dataService';
 import { formatDate, parseDate, getIsoWeekday, addDays } from '../../utils/schedule';
 import Header from '../../components/Header';
 import PageContainer from '../../components/PageContainer';
 import FrequencyBadge from '../../components/FrequencyBadge';
+import WorkerGroupSelect from '../../components/WorkerGroupSelect';
+import WorkerGroupBadge from '../../components/WorkerGroupBadge';
+import { useWorkerGroups } from '../../hooks/useWorkerGroups';
+import { useWorkers } from '../../hooks/useWorkers';
+import { useAction } from '../../hooks/useAction';
 import { colors, layout } from '../../theme';
+
+function getInitials(name) {
+  if (!name) return '??';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
 
 export default function SetScheduleScreen({ navigation }) {
   const { user } = useAuth();
   const queryClient = useQueryClient();
+  const runAction = useAction();
 
+  // Selection states
   const [selectedCatId, setSelectedCatId] = useState(null);
   const [selectedGroupId, setSelectedGroupId] = useState(null);
   const [selectedArea, setSelectedArea] = useState('All');
@@ -40,74 +55,100 @@ export default function SetScheduleScreen({ navigation }) {
   const [weekday, setWeekday] = useState(1); // 1 = Monday
   const [notes, setNotes] = useState('');
 
+  // Worker group assignment state
+  const [selectedGroupIdState, setSelectedGroupIdState] = useState(null);
+  const [allowUnassigned, setAllowUnassigned] = useState(false);
+
+  const { groups: workerGroupsList, membersByGroup } = useWorkerGroups();
+  const { data: workerData } = useWorkers();
+  const activeWorkers = workerData?.activeWorkers || [];
   const [successMessage, setSuccessMessage] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
 
-  // 1. Categories query (reference data: 10m cache)
-  const {
-    data: categories = [],
-    isLoading: loadingCategories,
-  } = useQuery({
+  // 1. Categories query
+  const { data: categories = [], isLoading: loadingCategories } = useQuery({
     queryKey: ['categories'],
     queryFn: fetchCategories,
     staleTime: 10 * 60 * 1000,
   });
 
-  // Select first category by default if none selected
+  // Auto-select first category
   useEffect(() => {
-    if (categories.length > 0 && !selectedCatId) {
+    if (!selectedCatId && categories.length > 0) {
       setSelectedCatId(categories[0].id);
     }
   }, [categories, selectedCatId]);
 
   // 2. Groups query
-  const {
-    data: groups = [],
-    isLoading: loadingGroups,
-  } = useQuery({
+  const { data: groups = [], isLoading: loadingGroups } = useQuery({
     queryKey: ['groups', selectedCatId],
     queryFn: () => fetchGroups(selectedCatId),
     enabled: !!selectedCatId,
     staleTime: 10 * 60 * 1000,
   });
 
-  const groupsIdsKey = useMemo(() => groups.map((g) => g.id).join(','), [groups]);
-
-  // Select first group when category or groups list changes
+  // Auto-select first group
   useEffect(() => {
     if (groups.length > 0) {
-      setSelectedGroupId((prev) => (groups.some((g) => g.id === prev) ? prev : groups[0].id));
+      setSelectedGroupId(groups[0].id);
     } else {
       setSelectedGroupId(null);
-      setSelectedEquipmentIds((prev) => (prev.size === 0 ? prev : new Set()));
     }
-  }, [groupsIdsKey, groups]);
+  }, [groups]);
 
   // 3. Equipment query
-  const {
-    data: equipmentList = [],
-    isLoading: loadingEquipment,
-  } = useQuery({
+  const { data: equipmentList = [], isLoading: loadingEquipment } = useQuery({
     queryKey: ['equipment', selectedGroupId],
-    queryFn: () => fetchEquipment({ groupId: selectedGroupId, activeOnly: true }),
+    queryFn: () => fetchEquipment(selectedGroupId),
     enabled: !!selectedGroupId,
-    staleTime: 10 * 60 * 1000,
+    staleTime: 5 * 60 * 1000,
   });
 
-  // Stable key representing current equipment ids
+  // 4. Query recent schedule rules to display under "Tasks created"
+  const {
+    data: recentRules = [],
+    isLoading: loadingRecentRules,
+    refetch: refetchRecentRules,
+  } = useQuery({
+    queryKey: ['recent_schedule_rules'],
+    queryFn: async () => {
+      if (!isConfigured || !supabase) return [];
+      const { data, error } = await supabase
+        .from('schedule_rules')
+        .select(`
+          id,
+          frequency,
+          start_date,
+          end_date,
+          notes,
+          worker_group_id,
+          worker_group:worker_groups(*),
+          equipment:equipment(name, area)
+        `)
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      if (error) {
+        if (__DEV__) console.log('[recent_schedule_rules error]', error);
+        return [];
+      }
+      return data || [];
+    },
+    staleTime: 30 * 1000,
+  });
+
+  // Reset selected equipment when group changes
   const equipmentIdsKey = useMemo(
     () => equipmentList.map((e) => e.id).join(','),
     [equipmentList]
   );
 
-  // Auto-select all equipment and suggest default frequency
   useEffect(() => {
     if (equipmentList.length > 0) {
-      setSelectedArea((prev) => (prev === 'All' ? prev : 'All'));
-      const newIds = new Set(equipmentList.map((item) => item.id));
-      setSelectedEquipmentIds((prev) => {
-        if (prev.size === newIds.size && [...newIds].every((id) => prev.has(id))) {
-          return prev;
+      setSelectedEquipmentIds(() => {
+        const newIds = new Set();
+        if (equipmentList[0]) {
+          newIds.add(equipmentList[0].id);
         }
         return newIds;
       });
@@ -120,25 +161,74 @@ export default function SetScheduleScreen({ navigation }) {
     }
   }, [equipmentIdsKey, equipmentList]);
 
-  // Bulk create mutation with double-submit protection
+  // Save mutation calling create_schedule_rules_for_group RPC
   const createRulesMutation = useMutation({
-    mutationFn: (rules) => createScheduleRules(rules),
-    onSuccess: (data, variables) => {
+    mutationFn: async (payload) => {
+      if (!isConfigured || !supabase) {
+        throw new Error('Supabase is not configured.');
+      }
+
+      const { data, error } = await supabase.rpc('create_schedule_rules_for_group', {
+        p_equipment_ids: payload.equipmentIds,
+        p_frequency: payload.frequency,
+        p_start_date: payload.startDate,
+        p_end_date: payload.endDate || null,
+        p_weekday: payload.frequency === 'w' ? payload.weekday : null,
+        p_notes: payload.notes || null,
+        p_group_id: payload.groupId || null,
+      });
+
+      if (error) {
+        if (error.code === '23505') {
+          throw new Error('A task with the same equipment, frequency and start date already exists.');
+        }
+        if (error.code === '42883' || error.code === 'PGRST202') {
+          throw new Error('Run the worker groups SQL in Supabase');
+        }
+        throw error;
+      }
+
+      return data;
+    },
+    onSuccess: (count, variables) => {
+      // Invalidate relevant queries
       queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
-      setSuccessMessage(`Successfully created ${variables.length} maintenance schedule rule(s)!`);
+      queryClient.invalidateQueries({ queryKey: ['schedule_rules_all'] });
+      queryClient.invalidateQueries({ queryKey: ['recent_schedule_rules'] });
+      queryClient.invalidateQueries({ queryKey: ['calendar_tasks'] });
+      queryClient.invalidateQueries({ queryKey: ['activity_logs'] });
+      queryClient.invalidateQueries({ queryKey: ['worker_groups'] });
+
+      const assignedGroup = workerGroupsList.find((g) => g.id === variables.groupId);
+      const memberCount = (membersByGroup[variables.groupId] || []).length;
+      const groupName = assignedGroup
+        ? `${assignedGroup.name} (${memberCount} ${memberCount === 1 ? 'worker' : 'workers'})`
+        : 'Nobody (Unassigned)';
+
+      const taskCount = count || variables.equipmentIds.length;
+      setSuccessMessage(
+        `Created ${taskCount} ${taskCount === 1 ? 'task' : 'tasks'} for ${groupName}`
+      );
+      setErrorMessage('');
+
+      // Reset assignment & notes
+      setNotes('');
+      setSelectedGroupIdState(null);
+      setAllowUnassigned(false);
+
       setTimeout(() => {
         setSuccessMessage('');
-      }, 5000);
+      }, 7000);
     },
     onError: (err) => {
-      setErrorMessage(err.message || 'Failed to save rules. Please check your network and try again.');
+      setErrorMessage(err.message || 'Failed to save rules. Please try again.');
     },
   });
 
   const loading = loadingCategories || (!!selectedCatId && loadingGroups);
   const saving = createRulesMutation.isPending;
 
-  // Filter equipment by area if applicable
+  // Filter equipment by area
   const availableAreas = Array.from(
     new Set(equipmentList.map((e) => e.area).filter(Boolean))
   );
@@ -159,42 +249,85 @@ export default function SetScheduleScreen({ navigation }) {
     setSelectedEquipmentIds(next);
   };
 
-  const handleSelectAll = () => {
-    if (selectedEquipmentIds.size === displayedEquipment.length) {
-      setSelectedEquipmentIds(new Set());
-    } else {
-      setSelectedEquipmentIds(new Set(displayedEquipment.map((e) => e.id)));
-    }
+  const handleSelectAllEquipment = () => {
+    const allIds = displayedEquipment.map((e) => e.id);
+    setSelectedEquipmentIds(new Set(allIds));
   };
 
-  const handleSave = async () => {
+  const handleClearEquipment = () => {
+    setSelectedEquipmentIds(new Set());
+  };
+
+  const handleSave = () => {
+    if (saving) return; // Prevent double taps
+
     if (selectedEquipmentIds.size === 0) {
       setErrorMessage('Please select at least one equipment.');
       return;
     }
+
     if (!startDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
       setErrorMessage('Please enter start date as YYYY-MM-DD.');
       return;
     }
+
     if (endDate && !endDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
       setErrorMessage('Please enter end date as YYYY-MM-DD or leave blank.');
+      return;
+    }
+
+    if (!selectedGroupIdState && !allowUnassigned) {
+      setErrorMessage(
+        'Please select a worker group, or turn on "Create without a group".'
+      );
       return;
     }
 
     setErrorMessage('');
     setSuccessMessage('');
 
-    const newRules = Array.from(selectedEquipmentIds).map((eqId) => ({
-      equipment_id: eqId,
-      frequency,
-      start_date: startDate,
-      end_date: endDate.trim() ? endDate.trim() : null,
-      weekday: frequency === 'w' ? weekday : null,
-      notes: notes.trim() ? notes.trim() : null,
-      created_by: user?.id || null,
-    }));
+    // Summary of selected equipment
+    const selectedEqNames = equipmentList
+      .filter((eq) => selectedEquipmentIds.has(eq.id))
+      .map((eq) => eq.name);
 
-    createRulesMutation.mutate(newRules);
+    const chosenGroup = workerGroupsList.find((g) => g.id === selectedGroupIdState);
+    const assignedGroupLabel = allowUnassigned || !chosenGroup
+      ? 'Nobody (Unassigned)'
+      : chosenGroup.name;
+
+    const groupMembersCount = chosenGroup
+      ? (membersByGroup[chosenGroup.id] || []).length
+      : 0;
+
+    runAction({
+      confirm: {
+        title: `Create ${selectedEquipmentIds.size} Schedule ${selectedEquipmentIds.size === 1 ? 'Task' : 'Tasks'}?`,
+        message: `Create schedule for ${selectedEqNames.slice(0, 2).join(', ')}${selectedEqNames.length > 2 ? ` and ${selectedEqNames.length - 2} more` : ''}?`,
+        details: [
+          `Frequency: ${frequency.toUpperCase()}`,
+          `Start Date: ${startDate}`,
+          `Group: ${assignedGroupLabel}${chosenGroup ? ` (${groupMembersCount} workers)` : ''}`,
+        ],
+        confirmText: 'Create Task',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'calendar-outline',
+      },
+      loading: 'Creating schedule tasks...',
+      action: async () => {
+        return await createRulesMutation.mutateAsync({
+          equipmentIds: Array.from(selectedEquipmentIds),
+          frequency,
+          startDate,
+          endDate: endDate.trim() ? endDate.trim() : null,
+          weekday,
+          notes: notes.trim() ? notes.trim() : null,
+          groupId: allowUnassigned ? null : selectedGroupIdState,
+        });
+      },
+      success: `Created ${selectedEquipmentIds.size} schedule ${selectedEquipmentIds.size === 1 ? 'task' : 'tasks'}`,
+    });
   };
 
   const freqOptions = [
@@ -250,6 +383,7 @@ export default function SetScheduleScreen({ navigation }) {
                   key={cat.id}
                   style={[styles.pill, isSelected && styles.pillSelected]}
                   onPress={() => setSelectedCatId(cat.id)}
+                  activeOpacity={0.7}
                 >
                   <Text style={[styles.pillText, isSelected && styles.pillTextSelected]}>
                     {cat.code}. {cat.name}
@@ -263,39 +397,57 @@ export default function SetScheduleScreen({ navigation }) {
         {/* 2. Pick Group */}
         <View style={styles.sectionCard}>
           <Text style={styles.cardHeader}>2. Equipment Group</Text>
-          <View style={styles.pillRow}>
-            {groups.map((grp) => {
-              const isSelected = selectedGroupId === grp.id;
-              return (
-                <TouchableOpacity
-                  key={grp.id}
-                  style={[styles.pill, isSelected && styles.pillSelected]}
-                  onPress={() => setSelectedGroupId(grp.id)}
-                >
-                  <Text style={[styles.pillText, isSelected && styles.pillTextSelected]}>
-                    {grp.item_no}. {grp.name}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+          {loadingGroups ? (
+            <ActivityIndicator size="small" color={colors.primary} />
+          ) : groups.length === 0 ? (
+            <Text style={styles.emptyText}>No groups in this category.</Text>
+          ) : (
+            <View style={styles.pillRow}>
+              {groups.map((grp) => {
+                const isSelected = selectedGroupId === grp.id;
+                return (
+                  <TouchableOpacity
+                    key={grp.id}
+                    style={[styles.pill, isSelected && styles.pillSelected]}
+                    onPress={() => setSelectedGroupId(grp.id)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.pillText, isSelected && styles.pillTextSelected]}>
+                      {grp.item_no ? `${grp.item_no}. ` : ''}
+                      {grp.name}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
         </View>
 
         {/* 3. Pick Area (if applicable) */}
         {hasAreas && (
           <View style={styles.sectionCard}>
-            <Text style={styles.cardHeader}>3. Area Filter</Text>
+            <Text style={styles.cardHeader}>3. Area / Location Filter</Text>
             <View style={styles.pillRow}>
-              {['All', ...availableAreas].map((a) => {
-                const isSelected = selectedArea === a;
+              <TouchableOpacity
+                style={[styles.pill, selectedArea === 'All' && styles.pillSelected]}
+                onPress={() => setSelectedArea('All')}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.pillText, selectedArea === 'All' && styles.pillTextSelected]}>
+                  All Areas
+                </Text>
+              </TouchableOpacity>
+              {availableAreas.map((area) => {
+                const isSelected = selectedArea === area;
                 return (
                   <TouchableOpacity
-                    key={a}
+                    key={area}
                     style={[styles.pill, isSelected && styles.pillSelected]}
-                    onPress={() => setSelectedArea(a)}
+                    onPress={() => setSelectedArea(area)}
+                    activeOpacity={0.7}
                   >
                     <Text style={[styles.pillText, isSelected && styles.pillTextSelected]}>
-                      {a}
+                      {area}
                     </Text>
                   </TouchableOpacity>
                 );
@@ -304,55 +456,56 @@ export default function SetScheduleScreen({ navigation }) {
           </View>
         )}
 
-        {/* 4. Equipment Selection */}
+        {/* 4. Equipment multi-select */}
         <View style={styles.sectionCard}>
           <View style={styles.cardHeaderRow}>
             <Text style={styles.cardHeader}>
-              4. Target Equipment ({selectedEquipmentIds.size} of {displayedEquipment.length} selected)
+              {hasAreas ? '4' : '3'}. Target Equipment ({selectedEquipmentIds.size} selected)
             </Text>
-            <TouchableOpacity onPress={handleSelectAll} style={styles.selectAllBtn}>
-              <Text style={styles.selectAllText}>
-                {selectedEquipmentIds.size === displayedEquipment.length
-                  ? 'Deselect All'
-                  : 'Select All'}
-              </Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 6 }}>
+              <TouchableOpacity
+                style={styles.headerActionBtn}
+                onPress={handleSelectAllEquipment}
+              >
+                <Text style={styles.headerActionText}>Select all</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.headerActionBtn}
+                onPress={handleClearEquipment}
+              >
+                <Text style={styles.headerActionText}>Clear</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
-          {displayedEquipment.length === 0 ? (
-            <Text style={styles.emptyNotice}>No active equipment in this group.</Text>
+          {loadingEquipment ? (
+            <ActivityIndicator size="small" color={colors.primary} />
+          ) : displayedEquipment.length === 0 ? (
+            <Text style={styles.emptyText}>No equipment found.</Text>
           ) : (
-            <View style={styles.equipmentList}>
+            <View style={styles.eqGrid}>
               {displayedEquipment.map((eq) => {
-                const isChecked = selectedEquipmentIds.has(eq.id);
+                const isSelected = selectedEquipmentIds.has(eq.id);
                 return (
                   <TouchableOpacity
                     key={eq.id}
-                    style={[styles.equipmentItem, isChecked && styles.equipmentItemSelected]}
+                    style={[styles.eqCard, isSelected && styles.eqCardSelected]}
                     onPress={() => toggleEquipment(eq.id)}
                     activeOpacity={0.7}
                   >
-                    <Ionicons
-                      name={isChecked ? 'checkbox' : 'square-outline'}
-                      size={22}
-                      color={isChecked ? colors.primary : colors.textMuted}
-                    />
-                    <View style={styles.eqInfo}>
-                      <Text style={[styles.eqName, isChecked && styles.eqNameSelected]}>
+                    <View style={[styles.checkbox, isSelected && styles.checkboxActive]}>
+                      {isSelected && (
+                        <Ionicons name="checkmark" size={14} color={colors.white} />
+                      )}
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.eqName, isSelected && styles.eqNameSelected]}>
                         {eq.name}
                       </Text>
                       {eq.area ? (
                         <Text style={styles.eqArea}>{eq.area}</Text>
                       ) : null}
                     </View>
-
-                    {eq.default_freq && eq.default_freq.length > 0 && (
-                      <View style={styles.freqPillsRow}>
-                        {eq.default_freq.map((f) => (
-                          <FrequencyBadge key={f} freq={f} size="small" />
-                        ))}
-                      </View>
-                    )}
                   </TouchableOpacity>
                 );
               })}
@@ -360,28 +513,23 @@ export default function SetScheduleScreen({ navigation }) {
           )}
         </View>
 
-        {/* 5. Schedule Rule Configuration */}
+        {/* 5. Frequency & Dates */}
         <View style={styles.sectionCard}>
-          <Text style={styles.cardHeader}>5. Frequency & Recurrence</Text>
+          <Text style={styles.cardHeader}>{hasAreas ? '5' : '4'}. Maintenance Frequency & Schedule</Text>
 
           {/* Frequency selector */}
-          <Text style={styles.fieldLabel}>Frequency Code</Text>
+          <Text style={styles.fieldLabel}>Frequency</Text>
           <View style={styles.freqRow}>
             {freqOptions.map((opt) => {
               const isSelected = frequency === opt.code;
               return (
                 <TouchableOpacity
                   key={opt.code}
-                  style={[styles.freqOption, isSelected && styles.freqOptionSelected]}
+                  style={[styles.freqBtn, isSelected && styles.freqBtnSelected]}
                   onPress={() => setFrequency(opt.code)}
+                  activeOpacity={0.7}
                 >
-                  <FrequencyBadge freq={opt.code} size="medium" />
-                  <Text
-                    style={[
-                      styles.freqOptionLabel,
-                      isSelected && styles.freqOptionLabelSelected,
-                    ]}
-                  >
+                  <Text style={[styles.freqText, isSelected && styles.freqTextSelected]}>
                     {opt.label}
                   </Text>
                 </TouchableOpacity>
@@ -389,29 +537,22 @@ export default function SetScheduleScreen({ navigation }) {
             })}
           </View>
 
-          {/* Weekday selector (only for w) */}
+          {/* Weekday selector (weekly only) */}
           {frequency === 'w' && (
-            <View style={styles.fieldGroup}>
-              <Text style={styles.fieldLabel}>Scheduled Work Weekday (1=Mon ... 7=Sun)</Text>
+            <View style={{ marginTop: 14 }}>
+              <Text style={styles.fieldLabel}>Scheduled Weekday</Text>
               <View style={styles.weekdayRow}>
-                {weekdayNames.map((w) => {
-                  const isDaySelected = weekday === w.day;
+                {weekdayNames.map((item) => {
+                  const isSelected = weekday === item.day;
                   return (
                     <TouchableOpacity
-                      key={w.day}
-                      style={[
-                        styles.weekdayBtn,
-                        isDaySelected && styles.weekdayBtnSelected,
-                      ]}
-                      onPress={() => setWeekday(w.day)}
+                      key={item.day}
+                      style={[styles.weekdayBtn, isSelected && styles.weekdayBtnSelected]}
+                      onPress={() => setWeekday(item.day)}
+                      activeOpacity={0.7}
                     >
-                      <Text
-                        style={[
-                          styles.weekdayText,
-                          isDaySelected && styles.weekdayTextSelected,
-                        ]}
-                      >
-                        {w.label}
+                      <Text style={[styles.weekdayText, isSelected && styles.weekdayTextSelected]}>
+                        {item.label}
                       </Text>
                     </TouchableOpacity>
                   );
@@ -420,10 +561,10 @@ export default function SetScheduleScreen({ navigation }) {
             </View>
           )}
 
-          {/* Dates: Start Date & End Date */}
+          {/* Dates */}
           <View style={styles.dateRow}>
             <View style={styles.dateCol}>
-              <Text style={styles.fieldLabel}>Start Date (YYYY-MM-DD) *</Text>
+              <Text style={styles.fieldLabel}>Start Date (YYYY-MM-DD)</Text>
               <TextInput
                 style={styles.dateInput}
                 value={startDate}
@@ -440,7 +581,9 @@ export default function SetScheduleScreen({ navigation }) {
                 <TouchableOpacity
                   onPress={() => {
                     const now = new Date();
-                    setStartDate(`${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`);
+                    setStartDate(
+                      `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+                    );
                   }}
                   style={styles.suggestionTag}
                 >
@@ -469,7 +612,7 @@ export default function SetScheduleScreen({ navigation }) {
           </View>
 
           {/* Notes */}
-          <View style={styles.fieldGroup}>
+          <View style={{ marginTop: 14 }}>
             <Text style={styles.fieldLabel}>Admin / Procedure Notes (Optional)</Text>
             <TextInput
               style={styles.notesInput}
@@ -482,9 +625,81 @@ export default function SetScheduleScreen({ navigation }) {
           </View>
         </View>
 
+        {/* 6. Assign Worker Group */}
+        <View style={styles.sectionCard}>
+          <Text style={styles.cardHeader}>
+            {hasAreas ? '6' : '5'}. Assign to Worker Group
+          </Text>
+
+          <WorkerGroupSelect
+            selectedGroupId={selectedGroupIdState}
+            onSelectGroup={(gId) => {
+              setSelectedGroupIdState(gId);
+              if (gId) setAllowUnassigned(false);
+            }}
+            allowUnassigned={false}
+            onNavigateToManageGroups={() => navigation.navigate('AssignWorkers')}
+            disabled={saving}
+          />
+
+          {/* Group preview */}
+          {selectedGroupIdState && (
+            <View style={styles.groupPreviewCard}>
+              {(() => {
+                const grp = workerGroupsList.find((g) => g.id === selectedGroupIdState);
+                if (!grp) return null;
+                const memberIds = membersByGroup[grp.id] || [];
+                const memberNames = memberIds
+                  .map((id) => activeWorkers.find((w) => w.id === id)?.full_name)
+                  .filter(Boolean);
+
+                return (
+                  <View style={{ gap: 4 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                      <WorkerGroupBadge group={grp} />
+                      <Text style={styles.previewCount}>
+                        ({memberIds.length} {memberIds.length === 1 ? 'worker' : 'workers'})
+                      </Text>
+                    </View>
+                    <Text style={styles.previewMembers} numberOfLines={2}>
+                      Members: {memberNames.length > 0 ? memberNames.join(', ') : 'No workers in this group yet'}
+                    </Text>
+                    {memberIds.length === 0 && (
+                      <Text style={styles.warningZeroMembers}>
+                        Warning: This group has no workers yet. Tasks will be created, but nobody can see them until workers are added to the group.
+                      </Text>
+                    )}
+                  </View>
+                );
+              })()}
+            </View>
+          )}
+
+          {/* Switch: Create without a group */}
+          <View style={styles.unassignedSwitchRow}>
+            <View style={{ flex: 1, paddingRight: 10 }}>
+              <Text style={styles.switchLabel}>Create without a group</Text>
+              <Text style={styles.switchSubtext}>
+                Nobody will see this task until it is assigned to a worker group
+              </Text>
+            </View>
+            <Switch
+              value={allowUnassigned}
+              onValueChange={(val) => {
+                setAllowUnassigned(val);
+                if (val) {
+                  setSelectedGroupIdState(null);
+                }
+              }}
+              trackColor={{ false: '#CBD5E1', true: colors.primary }}
+              thumbColor={colors.white}
+            />
+          </View>
+        </View>
+
         {/* Save button */}
         <TouchableOpacity
-          style={styles.saveBtn}
+          style={[styles.saveBtn, saving && styles.saveBtnDisabled]}
           onPress={handleSave}
           disabled={saving}
           activeOpacity={0.85}
@@ -493,13 +708,68 @@ export default function SetScheduleScreen({ navigation }) {
             <ActivityIndicator color={colors.white} size="small" />
           ) : (
             <>
-              <Ionicons name="save-outline" size={20} color={colors.white} style={{ marginRight: 8 }} />
+              <Ionicons
+                name="save-outline"
+                size={20}
+                color={colors.white}
+                style={{ marginRight: 8 }}
+              />
               <Text style={styles.saveBtnText}>
                 Create Schedule Rules ({selectedEquipmentIds.size} Equipment)
               </Text>
             </>
           )}
         </TouchableOpacity>
+
+        {/* Section: Tasks Created (Recent) */}
+        <View style={styles.recentSection}>
+          <View style={styles.recentHeaderRow}>
+            <Text style={styles.recentSectionTitle}>Tasks Created (Recent)</Text>
+            <TouchableOpacity onPress={() => refetchRecentRules()}>
+              <Ionicons name="refresh" size={16} color={colors.primary} />
+            </TouchableOpacity>
+          </View>
+
+          {loadingRecentRules ? (
+            <ActivityIndicator size="small" color={colors.primary} style={{ marginTop: 12 }} />
+          ) : recentRules.length === 0 ? (
+            <Text style={styles.emptyRecentText}>No schedule rules created yet.</Text>
+          ) : (
+            <View style={styles.recentList}>
+              {recentRules.map((rule) => {
+                return (
+                  <View key={rule.id} style={styles.recentRuleCard}>
+                    <View style={styles.recentCardTop}>
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flex: 1 }}>
+                        <FrequencyBadge freq={rule.frequency} size="small" />
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.recentEqName}>{rule.equipment?.name || 'Equipment'}</Text>
+                          {rule.equipment?.area ? (
+                            <Text style={styles.recentEqArea}>{rule.equipment.area}</Text>
+                          ) : null}
+                        </View>
+                      </View>
+                      <Text style={styles.recentStartDate}>From {rule.start_date}</Text>
+                    </View>
+
+                    {/* Assigned Worker Group */}
+                    <View style={styles.recentAssigneesRow}>
+                      <Text style={styles.assigneesLabel}>Assigned to:</Text>
+                      <WorkerGroupBadge group={rule.worker_group} />
+
+                      <TouchableOpacity
+                        style={styles.editWorkersBtn}
+                        onPress={() => navigation.navigate('AdminCalendar')}
+                      >
+                        <Text style={styles.editWorkersText}>Edit in Calendar</Text>
+                      </TouchableOpacity>
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
       </PageContainer>
     </View>
   );
@@ -510,17 +780,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-  content: {
-    paddingBottom: 40,
-    width: '100%',
-  },
   successBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#ECFDF5',
     borderColor: '#6EE7B7',
     borderWidth: 1,
-    padding: 12,
+    paddingTop: 12,
+    paddingBottom: 12,
+    paddingLeft: 12,
+    paddingRight: 12,
     borderRadius: 10,
     marginBottom: 16,
   },
@@ -537,7 +806,10 @@ const styles = StyleSheet.create({
     backgroundColor: '#FEF2F2',
     borderColor: '#FCA5A5',
     borderWidth: 1,
-    padding: 12,
+    paddingTop: 12,
+    paddingBottom: 12,
+    paddingLeft: 12,
+    paddingRight: 12,
     borderRadius: 10,
     marginBottom: 16,
   },
@@ -553,7 +825,10 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 16,
+    paddingTop: 16,
+    paddingBottom: 16,
+    paddingLeft: 16,
+    paddingRight: 16,
     marginBottom: 16,
   },
   cardHeader: {
@@ -568,11 +843,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
-  selectAllBtn: {
+  headerActionBtn: {
     paddingVertical: 4,
     paddingHorizontal: 8,
   },
-  selectAllText: {
+  headerActionText: {
     color: colors.primary,
     fontSize: 13,
     fontWeight: '700',
@@ -586,9 +861,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
     borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     minHeight: layout.minTouchTarget,
     justifyContent: 'center',
   },
@@ -605,51 +880,63 @@ const styles = StyleSheet.create({
     color: colors.white,
     fontWeight: '700',
   },
-  equipmentList: {
-    gap: 6,
+  emptyText: {
+    fontSize: 13,
+    color: colors.textMuted,
+    fontStyle: 'italic',
+    paddingVertical: 8,
   },
-  equipmentItem: {
+  eqGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  eqCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 12,
-    borderRadius: 10,
+    backgroundColor: colors.background,
     borderWidth: 1,
-    borderColor: colors.borderLight,
-    backgroundColor: colors.white,
-    minHeight: layout.minTouchTarget,
-  },
-  equipmentItemSelected: {
-    borderColor: colors.primaryLight,
-    backgroundColor: colors.primaryVeryLight,
-  },
-  eqInfo: {
+    borderColor: colors.border,
+    borderRadius: 10,
+    paddingTop: 10,
+    paddingBottom: 10,
+    paddingLeft: 10,
+    paddingRight: 10,
+    minWidth: 180,
     flex: 1,
-    marginLeft: 10,
+  },
+  eqCardSelected: {
+    backgroundColor: colors.primaryVeryLight,
+    borderColor: colors.primary,
+  },
+  checkbox: {
+    width: 20,
+    height: 20,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: '#94A3B8',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+    backgroundColor: colors.white,
+  },
+  checkboxActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
   },
   eqName: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     color: colors.dark,
   },
   eqNameSelected: {
+    color: colors.primaryDark,
     fontWeight: '700',
   },
   eqArea: {
     fontSize: 11,
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
-  freqPillsRow: {
-    flexDirection: 'row',
-    gap: 4,
-  },
-  emptyNotice: {
-    fontSize: 13,
     color: colors.textMuted,
-    fontStyle: 'italic',
-  },
-  fieldGroup: {
-    marginTop: 14,
+    marginTop: 2,
   },
   fieldLabel: {
     fontSize: 13,
@@ -659,40 +946,41 @@ const styles = StyleSheet.create({
   },
   freqRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     gap: 8,
+    flexWrap: 'wrap',
   },
-  freqOption: {
-    flexDirection: 'row',
+  freqBtn: {
+    flex: 1,
+    minWidth: 70,
     alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.background,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
     borderRadius: 10,
+    paddingVertical: 10,
     minHeight: layout.minTouchTarget,
   },
-  freqOptionSelected: {
+  freqBtnSelected: {
+    backgroundColor: colors.primary,
     borderColor: colors.primary,
-    backgroundColor: colors.primaryVeryLight,
   },
-  freqOptionLabel: {
-    marginLeft: 8,
+  freqText: {
     fontSize: 13,
     fontWeight: '700',
     color: colors.dark,
   },
-  freqOptionLabelSelected: {
-    color: colors.primaryDark,
+  freqTextSelected: {
+    color: colors.white,
   },
   weekdayRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
-    gap: 4,
+    gap: 6,
+    flexWrap: 'wrap',
   },
   weekdayBtn: {
     flex: 1,
+    minWidth: 40,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.background,
@@ -756,11 +1044,62 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 10,
-    padding: 12,
+    paddingTop: 12,
+    paddingBottom: 12,
+    paddingLeft: 12,
+    paddingRight: 12,
     fontSize: 14,
     color: colors.dark,
     minHeight: 70,
     textAlignVertical: 'top',
+  },
+  unassignedSwitchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#F8FAFC',
+    borderColor: '#E2E8F0',
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingTop: 12,
+    paddingBottom: 12,
+    paddingLeft: 12,
+    paddingRight: 12,
+    marginTop: 14,
+  },
+  groupPreviewCard: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 12,
+    marginTop: 10,
+  },
+  previewCount: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textSecondary,
+  },
+  previewMembers: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    marginTop: 2,
+  },
+  warningZeroMembers: {
+    fontSize: 11,
+    color: '#D97706',
+    fontWeight: '600',
+    marginTop: 4,
+  },
+  switchLabel: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.textDark,
+  },
+  switchSubtext: {
+    fontSize: 12,
+    color: colors.textMuted,
+    marginTop: 2,
   },
   saveBtn: {
     flexDirection: 'row',
@@ -770,16 +1109,127 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     marginTop: 8,
-    shadowColor: colors.primary,
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.25,
-    shadowRadius: 8,
-    elevation: 3,
+  },
+  saveBtnDisabled: {
+    opacity: 0.6,
   },
   saveBtnText: {
     color: colors.white,
     fontSize: 16,
     fontWeight: '800',
   },
+  recentSection: {
+    marginTop: 32,
+    marginBottom: 40,
+  },
+  recentHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  recentSectionTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.dark,
+  },
+  emptyRecentText: {
+    fontSize: 13,
+    color: colors.textMuted,
+    fontStyle: 'italic',
+    paddingVertical: 8,
+  },
+  recentList: {
+    gap: 10,
+  },
+  recentRuleCard: {
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 12,
+    paddingTop: 12,
+    paddingBottom: 12,
+    paddingLeft: 12,
+    paddingRight: 12,
+  },
+  recentCardTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  recentEqName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.dark,
+  },
+  recentEqArea: {
+    fontSize: 11,
+    color: colors.textMuted,
+  },
+  recentStartDate: {
+    fontSize: 12,
+    color: colors.textMuted,
+  },
+  recentAssigneesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 10,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  assigneesLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
+  unassignedChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: '#F0F9FF',
+  },
+  unassignedChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.primaryDark,
+  },
+  avatarGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flex: 1,
+  },
+  miniAvatar: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#0284C7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  miniAvatarText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: colors.white,
+  },
+  assigneeNamesText: {
+    fontSize: 12,
+    color: colors.textDark,
+    fontWeight: '600',
+    marginLeft: 4,
+  },
+  editWorkersBtn: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  editWorkersText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primary,
+  },
 });
-

@@ -11,6 +11,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useAuth } from '../../context/AuthContext';
 import {
   fetchCategories,
   fetchGroups,
@@ -32,6 +33,7 @@ import ProgressBar from '../../components/ProgressBar';
 import { colors } from '../../theme';
 
 export default function ChooseWorkScreen({ navigation, route }) {
+  const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const topInset = Math.max(
     insets?.top || 0,
@@ -64,7 +66,7 @@ export default function ChooseWorkScreen({ navigation, route }) {
         setLoading(true);
         const [cats, saved] = await Promise.all([
           fetchCategories(),
-          getSavedWorkerSelection(),
+          getSavedWorkerSelection(user?.id),
         ]);
         setCategories(cats);
 
@@ -81,7 +83,7 @@ export default function ChooseWorkScreen({ navigation, route }) {
       }
     }
     loadInitial();
-  }, []);
+  }, [user?.id]);
 
   // Fetch groups and equipment reference for the selected system
   useEffect(() => {
@@ -150,21 +152,27 @@ export default function ChooseWorkScreen({ navigation, route }) {
   const handleSelectCategory = async (cat) => {
     setSelectedCatId(cat.id);
     const newArea = cat.code === 'B' ? selectedArea : 'All';
-    await saveWorkerSelection({
-      categoryId: cat.id,
-      categoryName: cat.name,
-      area: newArea,
-    });
+    await saveWorkerSelection(
+      {
+        categoryId: cat.id,
+        categoryName: cat.name,
+        area: newArea,
+      },
+      user?.id
+    );
   };
 
   const handleSelectArea = async (area) => {
     setSelectedArea(area);
     if (selectedCategory) {
-      await saveWorkerSelection({
-        categoryId: selectedCategory.id,
-        categoryName: selectedCategory.name,
-        area,
-      });
+      await saveWorkerSelection(
+        {
+          categoryId: selectedCategory.id,
+          categoryName: selectedCategory.name,
+          area,
+        },
+        user?.id
+      );
     }
   };
 

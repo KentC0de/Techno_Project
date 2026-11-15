@@ -4,6 +4,7 @@ import { Ionicons } from '@expo/vector-icons';
 import FrequencyBadge from './FrequencyBadge';
 import StatusBadge from './StatusBadge';
 import TaskActionModal from './TaskActionModal';
+import WorkerGroupBadge from './WorkerGroupBadge';
 import { colors } from '../theme';
 
 export default function TaskCard({
@@ -68,12 +69,17 @@ export default function TaskCard({
         <StatusBadge status={status} />
       </View>
 
-      {/* Equipment name */}
+      {/* Main Content */}
       <View style={styles.mainContent}>
         <Text style={styles.equipmentName}>{equipment?.name || 'Equipment'}</Text>
         {category?.name ? (
           <Text style={styles.categorySubtext}>{category.code}. {category.name}</Text>
         ) : null}
+      </View>
+
+      {/* Worker Group Badge */}
+      <View style={{ marginTop: 6, marginBottom: 4 }}>
+        <WorkerGroupBadge group={task.rule?.worker_group || task.worker_group} />
       </View>
 
       {/* Notes if any */}
@@ -189,6 +195,23 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.05,
     shadowRadius: 3,
     elevation: 2,
+  },
+  coWorkersBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0F9FF',
+    borderColor: '#BAE6FD',
+    borderWidth: 1,
+    borderRadius: 8,
+    paddingVertical: 5,
+    paddingHorizontal: 8,
+    marginTop: 8,
+    alignSelf: 'flex-start',
+  },
+  coWorkersText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: colors.primaryDark,
   },
   overdueCard: {
     borderColor: '#FCA5A5',

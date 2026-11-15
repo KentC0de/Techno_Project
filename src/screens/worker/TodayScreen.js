@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -7,11 +7,13 @@ import {
   StyleSheet,
   RefreshControl,
   Platform,
+  AppState,
   StatusBar as RNStatusBar,
   useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase, isConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
@@ -30,6 +32,7 @@ import {
   addDays,
   getWorkWeek,
   buildDueTasks,
+  expandRuleDueDates,
   computePerformance,
 } from '../../utils/schedule';
 import Header from '../../components/Header';
@@ -38,6 +41,11 @@ import ProgressBar from '../../components/ProgressBar';
 import EmptyState from '../../components/EmptyState';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
 import ErrorMessage from '../../components/ErrorMessage';
+import WorkerGroupBadge from '../../components/WorkerGroupBadge';
+import { useWorkerGroups } from '../../hooks/useWorkerGroups';
+import { useWorkers } from '../../hooks/useWorkers';
+import { useAction } from '../../hooks/useAction';
+import { useToast } from '../../components/feedback';
 import { colors, layout } from '../../theme';
 
 export default function TodayScreen({ navigation, route }) {
@@ -46,6 +54,23 @@ export default function TodayScreen({ navigation, route }) {
   const { width } = useWindowDimensions();
   const { status: connStatus, lastCheckedTime } = useConnectionStatus();
   const queryClient = useQueryClient();
+  const runAction = useAction();
+  const toast = useToast();
+
+  const { groups: workerGroupsList, groupByUser, membersByGroup, refetch: refetchWorkerGroups } = useWorkerGroups();
+  const { data: workerData } = useWorkers();
+
+  // Current worker's group & teammates
+  const myGroupId = user?.id ? groupByUser[user.id] : null;
+  const myGroup = myGroupId ? workerGroupsList.find((g) => g.id === myGroupId) : null;
+  const myTeammates = useMemo(() => {
+    if (!myGroupId || !user?.id) return [];
+    const memberIds = membersByGroup[myGroupId] || [];
+    return memberIds
+      .filter((id) => id !== user.id)
+      .map((id) => (workerData?.allUsers || []).find((u) => u.id === id)?.full_name)
+      .filter(Boolean);
+  }, [myGroupId, membersByGroup, user?.id, workerData]);
 
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
   const [selection, setSelection] = useState({
@@ -62,20 +87,18 @@ export default function TodayScreen({ navigation, route }) {
   const pastWindowStart = formatDate(addDays(today, -30));
   const futureWindowEnd = formatDate(addDays(today, 14));
 
-  // Load rules with react-query
+  // Load rules with react-query (fetch all group tasks for worker; JS filtering applied)
   const {
-    data: rules = [],
+    data: rawRules = [],
     isLoading: rulesLoading,
     error: rulesError,
     refetch: refetchRules,
   } = useQuery({
-    queryKey: ['schedule_rules', selection.categoryId, selection.area],
-    queryFn: () =>
-      fetchScheduleRules({
-        categoryId: selection.categoryId,
-        area: selection.area,
-      }),
-    staleTime: 30 * 1000,
+    queryKey: ['schedule_rules', user?.id, selection.categoryId, selection.area, currentDateStr],
+    queryFn: () => fetchScheduleRules(),
+    enabled: !!user?.id,
+    staleTime: 15 * 1000,
+    refetchInterval: 60 * 1000,
   });
 
   // Load task logs with react-query
@@ -85,67 +108,71 @@ export default function TodayScreen({ navigation, route }) {
     error: logsError,
     refetch: refetchLogs,
   } = useQuery({
-    queryKey: ['task_logs', pastWindowStart, futureWindowEnd],
+    queryKey: ['task_logs', user?.id, pastWindowStart, futureWindowEnd, currentDateStr],
     queryFn: () => fetchTaskLogs(pastWindowStart, futureWindowEnd),
-    staleTime: 30 * 1000,
+    enabled: !!user?.id,
+    staleTime: 15 * 1000,
+    refetchInterval: 60 * 1000,
   });
 
   const loading = rulesLoading || logsLoading;
   const error = rulesError?.message || logsError?.message || null;
 
-  // Realtime subscription for task_logs invalidation
-  useEffect(() => {
-    if (!isConfigured || !supabase?.channel) return;
+  // Compute all tasks across all systems before selection filtering
+  const allTasksUnfiltered = useMemo(() => {
+    if (!rawRules || rawRules.length === 0) return [];
+    return buildDueTasks(rawRules, logs, pastWindowStart, futureWindowEnd);
+  }, [rawRules, logs, pastWindowStart, futureWindowEnd]);
 
-    const channel = supabase
-      .channel(`worker_task_logs_${pastWindowStart}_${futureWindowEnd}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'task_logs' },
-        () => {
-          queryClient.invalidateQueries({ queryKey: ['task_logs'] });
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [pastWindowStart, futureWindowEnd, queryClient]);
-
-  // Compute all tasks using useMemo
-  const allTasks = React.useMemo(() => {
-    if (!rules || rules.length === 0) return [];
-    return buildDueTasks(rules, logs, pastWindowStart, futureWindowEnd);
-  }, [rules, logs, pastWindowStart, futureWindowEnd]);
-
-  // Check saved worker selection on mount if none provided
+  // Check saved worker selection on mount if none provided.
+  // If the saved selection yields 0 tasks while allTasksUnfiltered has tasks,
+  // automatically reset to "All my systems / areas" so tasks are not hidden!
   useEffect(() => {
     async function loadSaved() {
       if (!selection.categoryId) {
-        const saved = await getSavedWorkerSelection();
-        if (saved && saved.categoryId) {
-          setSelection({
-            categoryId: saved.categoryId,
-            categoryName: saved.categoryName || 'Selected System',
-            area: saved.area || 'All',
-          });
-        } else {
-          try {
-            const cats = await fetchCategories();
-            if (cats.length > 0) {
-              setSelection({
-                categoryId: cats[0].id,
-                categoryName: cats[0].name,
-                area: 'All',
-              });
-            }
-          } catch (_) {}
-        }
+        try {
+          const saved = await getSavedWorkerSelection(user?.id);
+          if (saved && saved.categoryId) {
+            setSelection({
+              categoryId: saved.categoryId,
+              categoryName: saved.categoryName || 'Selected System',
+              area: saved.area || 'All',
+            });
+            return;
+          }
+        } catch (_) {}
+
+        setSelection({
+          categoryId: null,
+          categoryName: 'All Systems',
+          area: 'All',
+        });
       }
     }
     loadSaved();
-  }, []);
+  }, [user?.id]);
+
+  // Auto-reset filter if saved filter hides all tasks
+  useEffect(() => {
+    if (selection.categoryId && allTasksUnfiltered.length > 0) {
+      const matchCount = allTasksUnfiltered.filter((t) => {
+        const catMatch =
+          t.equipment?.group?.category_id === selection.categoryId ||
+          t.equipment?.group?.category?.id === selection.categoryId;
+        const areaMatch =
+          !selection.area || selection.area === 'All' || t.equipment?.area === selection.area;
+        return catMatch && areaMatch;
+      }).length;
+
+      if (matchCount === 0) {
+        setSelection({
+          categoryId: null,
+          categoryName: 'All Systems',
+          area: 'All',
+        });
+      }
+    }
+  }, [allTasksUnfiltered, selection.categoryId, selection.area]);
 
   // When returning with new selection params
   useEffect(() => {
@@ -157,6 +184,48 @@ export default function TodayScreen({ navigation, route }) {
       });
     }
   }, [route?.params]);
+
+  // Refetch on AppState active (foreground)
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        refetchRules();
+        refetchLogs();
+      }
+    });
+    return () => subscription.remove();
+  }, [refetchRules, refetchLogs]);
+
+  // Refetch on screen focus
+  useFocusEffect(
+    useCallback(() => {
+      refetchRules();
+      refetchLogs();
+    }, [refetchRules, refetchLogs])
+  );
+
+  // Apply user selection (system / area) to raw rules
+  const rules = useMemo(() => {
+    if (!rawRules || rawRules.length === 0) return [];
+    let list = rawRules;
+    if (selection.categoryId) {
+      list = list.filter(
+        (r) =>
+          r.equipment?.group?.category_id === selection.categoryId ||
+          r.equipment?.group?.category?.id === selection.categoryId
+      );
+    }
+    if (selection.area && selection.area !== 'All') {
+      list = list.filter((r) => r.equipment?.area === selection.area);
+    }
+    return list;
+  }, [rawRules, selection.categoryId, selection.area]);
+
+  // Compute all tasks for the filtered rules
+  const allTasks = useMemo(() => {
+    if (!rules || rules.length === 0) return [];
+    return buildDueTasks(rules, logs, pastWindowStart, futureWindowEnd);
+  }, [rules, logs, pastWindowStart, futureWindowEnd]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -210,7 +279,12 @@ export default function TodayScreen({ navigation, route }) {
           context.previousLogs
         );
       }
-      alert(err.message || 'Failed to update task.');
+      // Graceful concurrent notice
+      if (err?.code === '23505' || err?.message?.includes('duplicate key') || err?.message?.includes('already exists')) {
+        alert('This task was already completed by a co-worker.');
+      } else {
+        alert(err.message || 'Failed to update task.');
+      }
     },
     onSettled: () => {
       setMutatingRuleId(null);
@@ -220,20 +294,76 @@ export default function TodayScreen({ navigation, route }) {
 
   const handleUpdateStatus = (task, status, note) => {
     if (mutatingRuleId) return; // double-submit prevention
-    updateLogMutation.mutate({ task, status, note });
+
+    const statusLabel =
+      status === 'done' ? 'Mark Done' : status === 'issue' ? 'Report Issue' : 'Skip Task';
+    const isDone = status === 'done';
+
+    runAction({
+      confirm: {
+        title: `${statusLabel}?`,
+        message: `${statusLabel} for "${task.equipment?.name || 'Equipment'}"?`,
+        details: [
+          `Date: ${task.due_date}`,
+          `Area: ${task.equipment?.area || 'General Area'}`,
+          note ? `Note: "${note}"` : null,
+        ].filter(Boolean),
+        confirmText: statusLabel,
+        cancelText: 'Cancel',
+        tone: status === 'issue' ? 'danger' : 'default',
+        icon: isDone
+          ? 'checkmark-circle-outline'
+          : status === 'issue'
+          ? 'alert-circle-outline'
+          : 'play-forward-outline',
+      },
+      loading: 'Updating task status...',
+      action: async () => {
+        return await updateLogMutation.mutateAsync({ task, status, note });
+      },
+      success: `Task marked as ${status.toUpperCase()}`,
+    });
   };
 
-  const handleUndoStatus = async (task) => {
+  const handleUndoStatus = (task) => {
     if (mutatingRuleId) return;
-    try {
-      setMutatingRuleId(task.rule_id);
-      await undoTaskLog(task.rule_id, task.due_date);
-      queryClient.invalidateQueries({ queryKey: ['task_logs'] });
-    } catch (err) {
-      alert(err.message || 'Failed to undo task.');
-    } finally {
-      setMutatingRuleId(null);
-    }
+
+    runAction({
+      confirm: {
+        title: 'Undo Completion?',
+        message: `Reopen task for "${task.equipment?.name || 'Equipment'}" on ${task.due_date}?`,
+        confirmText: 'Reopen Task',
+        cancelText: 'Cancel',
+        tone: 'danger',
+        icon: 'arrow-undo-outline',
+      },
+      loading: 'Reopening task...',
+      action: async () => {
+        await undoTaskLog(task.rule_id, task.due_date);
+        queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+      },
+      success: 'Task reopened successfully',
+    });
+  };
+
+  const handleStatusPress = () => {
+    const msg =
+      connStatus === 'connected'
+        ? `Supabase connected - Live\nLast checked: ${lastCheckedTime || 'Just now'}`
+        : connStatus === 'checking'
+        ? 'Checking Supabase connection...'
+        : 'Cannot reach Supabase (Offline / Demo Mode)';
+
+    runAction({
+      confirm: {
+        title: 'Connection Status',
+        message: msg,
+        confirmText: 'OK',
+        cancelText: 'Close',
+        tone: 'default',
+        icon: 'wifi-outline',
+      },
+    });
   };
 
   // Week strip calculation
@@ -256,6 +386,44 @@ export default function TodayScreen({ navigation, route }) {
     return acc;
   }, {});
 
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+
+  // Hidden tasks calculation for honesty state
+  const hiddenCountByFilter = useMemo(() => {
+    if (!selection.categoryId && (!selection.area || selection.area === 'All')) return 0;
+    const unfilteredDue = allTasksUnfiltered.filter((t) => t.due_date === currentDateStr);
+    return Math.max(0, unfilteredDue.length - selectedDateTasks.length);
+  }, [allTasksUnfiltered, currentDateStr, selectedDateTasks.length, selection.categoryId, selection.area]);
+
+  // Next upcoming task for "none due today" honesty state
+  const nextUpcomingTask = useMemo(() => {
+    if (selectedDateTasks.length > 0 || !rawRules || rawRules.length === 0) return null;
+    let next = null;
+    const rangeEnd = formatDate(addDays(new Date(), 90));
+    rawRules.forEach((rule) => {
+      const dates = expandRuleDueDates(rule, currentDateStr, rangeEnd);
+      const futureDates = dates.filter((d) => d > currentDateStr).sort();
+      if (futureDates.length > 0) {
+        const firstDate = futureDates[0];
+        if (!next || firstDate < next.date) {
+          next = {
+            date: firstDate,
+            equipmentName: rule.equipment?.name || 'Equipment',
+          };
+        }
+      }
+    });
+    return next;
+  }, [selectedDateTasks.length, rawRules, currentDateStr]);
+
+  const handleResetFilters = () => {
+    setSelection({
+      categoryId: null,
+      categoryName: 'All Systems',
+      area: 'All',
+    });
+  };
+
   const perf = computePerformance(selectedDateTasks);
 
   const [statusReason, setStatusReason] = useState('');
@@ -269,16 +437,6 @@ export default function TodayScreen({ navigation, route }) {
     if (connStatus === 'connected') return '#10B981';
     if (connStatus === 'checking') return '#F59E0B';
     return '#EF4444';
-  };
-
-  const handleStatusPress = () => {
-    const msg =
-      connStatus === 'connected'
-        ? `Supabase connected - Live\nLast checked: ${lastCheckedTime || 'Just now'}`
-        : connStatus === 'checking'
-        ? 'Checking Supabase connection...'
-        : 'Cannot reach Supabase (Offline / Demo Mode)';
-    alert(msg);
   };
 
   return (
@@ -323,9 +481,21 @@ export default function TodayScreen({ navigation, route }) {
           <Text style={styles.pageTitle} numberOfLines={1} ellipsizeMode="tail">
             Today's Tasks
           </Text>
-          <Text style={styles.pageSubtitle} numberOfLines={1} ellipsizeMode="tail">
-            {selection.categoryName} • {selection.area}
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
+            <Text style={styles.pageSubtitle} numberOfLines={1} ellipsizeMode="tail">
+              {selection.categoryName} • {selection.area}
+            </Text>
+            {selection.categoryId && (
+              <TouchableOpacity
+                onPress={handleResetFilters}
+                style={{ paddingVertical: 2, paddingHorizontal: 8, backgroundColor: '#E0F2FE', borderRadius: 6 }}
+              >
+                <Text style={{ fontSize: 11, fontWeight: '700', color: colors.primary }}>
+                  Show All Systems
+                </Text>
+              </TouchableOpacity>
+            )}
+          </View>
         </View>
 
         {/* Quick Date Switcher: Yesterday / Today / Tomorrow */}
@@ -429,6 +599,30 @@ export default function TodayScreen({ navigation, route }) {
           </View>
         </View>
 
+        {/* Group & Team Header Box */}
+        {myGroup ? (
+          <View style={styles.teamInfoBanner}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <WorkerGroupBadge group={myGroup} />
+              {myGroup.shift_start && myGroup.shift_end && (
+                <Text style={styles.shiftHintText}>
+                  Shift {myGroup.shift_start.slice(0, 5)} - {myGroup.shift_end.slice(0, 5)}
+                </Text>
+              )}
+            </View>
+            <Text style={styles.teammatesText}>
+              Team: {myTeammates.length > 0 ? myTeammates.join(', ') : 'You are the only active member'}
+            </Text>
+          </View>
+        ) : (
+          <View style={styles.noGroupBanner}>
+            <Ionicons name="information-circle-outline" size={16} color="#0284C7" />
+            <Text style={styles.noGroupBannerText}>
+              You are currently not in any worker group. Ask an admin to assign you in Assign Workers.
+            </Text>
+          </View>
+        )}
+
         {/* Progress Bar */}
         <ProgressBar
           completed={perf.completedCount}
@@ -480,14 +674,49 @@ export default function TodayScreen({ navigation, route }) {
               </Text>
             </View>
 
-            {selectedDateTasks.length === 0 ? (
+            {/* Honest Empty States */}
+            {!myGroupId ? (
               <EmptyState
-                title="No tasks for today"
-                message="All scheduled maintenance is up to date or no activities planned for this day."
-                icon="checkmark-done-circle-outline"
-                actionLabel="Switch System or Area"
-                onAction={() => navigation.navigate('ChooseWorkTab', { isChangingWork: true })}
+                title="Not in a worker group yet"
+                message="You are not in a worker group yet. Please contact your admin."
+                icon="people-outline"
               />
+            ) : rawRules.length === 0 ? (
+              <EmptyState
+                title="No tasks for your group yet"
+                message="No tasks for your group yet. Your administrator has not assigned schedule rules to your group."
+                icon="calendar-outline"
+              />
+            ) : rules.length === 0 ? (
+              <EmptyState
+                title="Tasks hidden by system filter"
+                message="Tasks are assigned to your group, but none match the currently selected system or area."
+                icon="filter-outline"
+                actionLabel="Show all my tasks"
+                onAction={handleResetFilters}
+              />
+            ) : selectedDateTasks.length === 0 ? (
+              hiddenCountByFilter > 0 ? (
+                <EmptyState
+                  title="Tasks hidden by filter"
+                  message={`${hiddenCountByFilter} ${hiddenCountByFilter === 1 ? 'task is' : 'tasks are'} hidden by your system/area filter for ${currentDateStr}.`}
+                  icon="funnel-outline"
+                  actionLabel="Show all my tasks"
+                  onAction={handleResetFilters}
+                />
+              ) : (
+                <EmptyState
+                  title="No tasks due today"
+                  message={
+                    nextUpcomingTask
+                      ? `No tasks due today. Next task: ${nextUpcomingTask.equipmentName} on ${nextUpcomingTask.date}`
+                      : 'No tasks due today. All scheduled maintenance is up to date.'
+                  }
+                  icon="checkmark-done-circle-outline"
+                  actionLabel="Switch System or Area"
+                  onAction={() => navigation.navigate('ChooseWorkTab', { isChangingWork: true })}
+                />
+              )
             ) : (
               Object.entries(groupedTasks).map(([groupName, tasksInGroup]) => (
                 <View key={groupName} style={styles.groupContainer}>
@@ -511,6 +740,71 @@ export default function TodayScreen({ navigation, route }) {
               ))
             )}
           </>
+        )}
+
+        {/* Collapsible Diagnostics Panel (__DEV__ only) */}
+        {__DEV__ && (
+          <View style={styles.diagContainer}>
+            <TouchableOpacity
+              style={styles.diagHeader}
+              onPress={() => setDiagnosticsOpen((prev) => !prev)}
+              activeOpacity={0.7}
+            >
+              <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                <Ionicons
+                  name={diagnosticsOpen ? 'chevron-down' : 'chevron-forward'}
+                  size={16}
+                  color={colors.primaryDark}
+                />
+                <Text style={styles.diagTitle}>Diagnostics (Dev Only)</Text>
+              </View>
+              <Text style={styles.diagBadge}>
+                {rawRules.length} raw | {selectedDateTasks.length} due
+              </Text>
+            </TouchableOpacity>
+
+            {diagnosticsOpen && (
+              <View style={styles.diagBody}>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>User ID: </Text>
+                  {user?.id || 'none'}
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Role: </Text>
+                  {user?.role || 'none'} | <Text style={styles.diagLabel}>Status: </Text>
+                  {user?.status || 'active'}
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Worker Group: </Text>
+                  {myGroup?.name ? `${myGroup.name} (${myGroupId})` : myGroupId || 'none (not in worker_group_members)'}
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Raw Rules returned: </Text>
+                  {rawRules.length} (before category/area filter)
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Rules after filter: </Text>
+                  {rules.length}
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Total expanded tasks: </Text>
+                  {allTasks.length} in window [-30d..+14d]
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Tasks due on {currentDateStr}: </Text>
+                  {selectedDateTasks.length}
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Saved Selection: </Text>
+                  {selection.categoryName} ({selection.categoryId || 'All'}) • {selection.area}
+                </Text>
+                <Text style={styles.diagItem}>
+                  <Text style={styles.diagLabel}>Tasks hidden by filter: </Text>
+                  {hiddenCountByFilter}
+                </Text>
+              </View>
+            )}
+          </View>
         )}
       </ScrollView>
     </View>
@@ -630,6 +924,42 @@ const styles = StyleSheet.create({
   },
   quickDateTextActive: {
     color: colors.white,
+  },
+  teamInfoBanner: {
+    backgroundColor: '#F8FAFC',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    padding: 12,
+    marginBottom: 12,
+    gap: 6,
+  },
+  shiftHintText: {
+    fontSize: 11,
+    color: colors.textSecondary,
+    fontWeight: '600',
+  },
+  teammatesText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    fontWeight: '500',
+  },
+  noGroupBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: '#F0F9FF',
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+    padding: 10,
+    marginBottom: 12,
+  },
+  noGroupBannerText: {
+    flex: 1,
+    fontSize: 11,
+    color: '#0369A1',
+    fontWeight: '600',
   },
   weekStripContainer: {
     backgroundColor: colors.white,
@@ -759,6 +1089,50 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.primaryDark,
     marginLeft: 6,
+  },
+  diagContainer: {
+    marginTop: 24,
+    marginBottom: 20,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
+    borderRadius: 10,
+    overflow: 'hidden',
+  },
+  diagHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: '#F1F5F9',
+  },
+  diagTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.dark,
+    marginLeft: 6,
+  },
+  diagBadge: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.primaryDark,
+  },
+  diagBody: {
+    padding: 12,
+    backgroundColor: '#FFFFFF',
+    borderTopWidth: 1,
+    borderTopColor: '#E2E8F0',
+  },
+  diagItem: {
+    fontSize: 11,
+    color: '#334155',
+    marginBottom: 4,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  diagLabel: {
+    fontWeight: '700',
+    color: colors.dark,
   },
 });
 

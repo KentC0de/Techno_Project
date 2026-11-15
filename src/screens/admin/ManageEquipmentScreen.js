@@ -26,6 +26,7 @@ import Header from '../../components/Header';
 import PageContainer from '../../components/PageContainer';
 import FrequencyBadge from '../../components/FrequencyBadge';
 import { useSystemFilter } from '../../context/SystemFilterContext';
+import { useAction } from '../../hooks/useAction';
 import { colors, layout } from '../../theme';
 
 // Normalization helper for duplicate detection
@@ -43,6 +44,7 @@ function normalizeName(name) {
 export default function ManageEquipmentScreen({ navigation }) {
   const queryClient = useQueryClient();
   const { selectedSystem, setSelectedSystem, systemOptions } = useSystemFilter();
+  const runAction = useAction();
   const [searchQuery, setSearchQuery] = useState('');
   const [showDedupeBanner, setShowDedupeBanner] = useState(true);
   const [expandDuplicates, setExpandDuplicates] = useState(false);
@@ -124,14 +126,6 @@ export default function ManageEquipmentScreen({ navigation }) {
       queryClient.invalidateQueries({ queryKey: ['equipment'] });
       setEqModalVisible(false);
     },
-    onError: (err) => {
-      const msg = err.message || 'Failed to save equipment.';
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        window.alert(msg);
-      } else {
-        Alert.alert('Error', msg);
-      }
-    },
   });
 
   const toggleActiveMutation = useMutation({
@@ -139,14 +133,6 @@ export default function ManageEquipmentScreen({ navigation }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['equipment_all'] });
       queryClient.invalidateQueries({ queryKey: ['equipment'] });
-    },
-    onError: (err) => {
-      const msg = err.message || 'Failed to update status.';
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        window.alert(msg);
-      } else {
-        Alert.alert('Error', msg);
-      }
     },
   });
 
@@ -158,14 +144,6 @@ export default function ManageEquipmentScreen({ navigation }) {
       setGrpModalVisible(false);
       setGrpName('');
       setGrpItemNo('');
-    },
-    onError: (err) => {
-      const msg = err.message || 'Failed to create group.';
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        window.alert(msg);
-      } else {
-        Alert.alert('Error', msg);
-      }
     },
   });
 
@@ -360,12 +338,16 @@ export default function ManageEquipmentScreen({ navigation }) {
 
   const handleSaveEquipment = () => {
     if (!eqName.trim() || !eqGroupId) {
-      const msg = 'Please provide equipment name and group.';
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        window.alert(msg);
-      } else {
-        Alert.alert('Validation Error', msg);
-      }
+      runAction({
+        confirm: {
+          title: 'Validation Error',
+          message: 'Please provide both an equipment name and group.',
+          confirmText: 'Understood',
+          cancelText: 'Close',
+          tone: 'default',
+          icon: 'information-circle-outline',
+        },
+      });
       return;
     }
 
@@ -378,33 +360,97 @@ export default function ManageEquipmentScreen({ navigation }) {
       is_active: eqIsActive,
     };
 
-    saveEquipmentMutation.mutate({
-      isEditing: !!editingEq,
-      id: editingEq?.id,
-      payload,
+    const isEditing = !!editingEq;
+
+    runAction({
+      confirm: {
+        title: isEditing ? 'Update Equipment?' : 'Add New Equipment?',
+        message: `${isEditing ? 'Save changes to' : 'Add'} "${eqName.trim()}" in ${eqArea === 'None' ? 'general area' : eqArea}?`,
+        confirmText: isEditing ? 'Save Equipment' : 'Add Equipment',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'hardware-chip-outline',
+      },
+      loading: isEditing ? 'Saving equipment...' : 'Adding equipment...',
+      action: async () => {
+        if (isEditing) {
+          return await updateEquipment(editingEq.id, payload);
+        }
+        return await createEquipment(payload);
+      },
+      success: isEditing ? 'Equipment updated successfully' : 'Equipment added successfully',
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['equipment_all'] });
+        queryClient.invalidateQueries({ queryKey: ['equipment'] });
+        setEqModalVisible(false);
+      },
     });
   };
 
   const handleToggleActive = (eq) => {
-    toggleActiveMutation.mutate({ id: eq.id, is_active: !eq.is_active });
+    const nextStatus = !eq.is_active;
+    runAction({
+      confirm: {
+        title: nextStatus ? 'Activate Equipment?' : 'Deactivate Equipment?',
+        message: `${nextStatus ? 'Activate' : 'Deactivate'} "${eq.name}"? ${nextStatus ? 'It will become selectable for maintenance scheduling.' : 'It will be hidden from new schedule setups.'}`,
+        confirmText: nextStatus ? 'Activate' : 'Deactivate',
+        cancelText: 'Cancel',
+        tone: nextStatus ? 'default' : 'danger',
+        icon: nextStatus ? 'checkmark-circle-outline' : 'pause-circle-outline',
+      },
+      loading: `${nextStatus ? 'Activating' : 'Deactivating'} equipment...`,
+      action: async () => {
+        await updateEquipment(eq.id, { is_active: nextStatus });
+      },
+      success: `Equipment ${nextStatus ? 'activated' : 'deactivated'} successfully`,
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['equipment_all'] });
+        queryClient.invalidateQueries({ queryKey: ['equipment'] });
+      },
+    });
   };
 
   const handleSaveGroup = () => {
     if (!grpName.trim() || !grpCatId) {
-      const msg = 'Please provide a group name and category.';
-      if (Platform.OS === 'web' && typeof window !== 'undefined') {
-        window.alert(msg);
-      } else {
-        Alert.alert('Validation Error', msg);
-      }
+      runAction({
+        confirm: {
+          title: 'Validation Error',
+          message: 'Please provide a group name and select a category.',
+          confirmText: 'Understood',
+          cancelText: 'Close',
+          tone: 'default',
+          icon: 'information-circle-outline',
+        },
+      });
       return;
     }
 
     const catGroups = allGroups.filter((g) => g.category_id === grpCatId);
-    saveGroupMutation.mutate({
-      category_id: grpCatId,
-      item_no: grpItemNo ? parseInt(grpItemNo, 10) : catGroups.length + 1,
-      name: grpName.trim(),
+    runAction({
+      confirm: {
+        title: 'Add New Group?',
+        message: `Create group "${grpName.trim()}" in this category?`,
+        confirmText: 'Create Group',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'folder-outline',
+      },
+      loading: 'Creating group...',
+      action: async () => {
+        return await createGroup({
+          category_id: grpCatId,
+          item_no: grpItemNo ? parseInt(grpItemNo, 10) : catGroups.length + 1,
+          name: grpName.trim(),
+        });
+      },
+      success: 'Group created successfully',
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['groups_all'] });
+        queryClient.invalidateQueries({ queryKey: ['groups'] });
+        setGrpModalVisible(false);
+        setGrpName('');
+        setGrpItemNo('');
+      },
     });
   };
 

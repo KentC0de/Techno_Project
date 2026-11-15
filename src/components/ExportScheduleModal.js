@@ -51,7 +51,6 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
   const [monthLabel, setMonthLabel] = useState('');
 
   // Options
-  const [showPlanned, setShowPlanned] = useState(true);
   const [addNotes, setAddNotes] = useState(true);
 
   // Status
@@ -293,7 +292,6 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
         siteName: siteName.trim(),
         revisionLabel: revisionLabel.trim() || 'REV A',
         selectedSystemCode,
-        showPlanned,
         addNotes,
       });
 
@@ -492,21 +490,6 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
             <Text style={styles.sectionHeading}>4. Options</Text>
             <TouchableOpacity
               style={styles.checkboxRow}
-              onPress={() => setShowPlanned(!showPlanned)}
-              activeOpacity={0.7}
-            >
-              <Ionicons
-                name={showPlanned ? 'checkbox' : 'square-outline'}
-                size={20}
-                color={showPlanned ? colors.primary : colors.textMuted}
-              />
-              <Text style={styles.checkboxLabel}>
-                Show planned frequency markers in future/pending cells (d, w, M, Q, SA)
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={styles.checkboxRow}
               onPress={() => setAddNotes(!addNotes)}
               activeOpacity={0.7}
             >
@@ -515,9 +498,14 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
                 size={20}
                 color={addNotes ? colors.primary : colors.textMuted}
               />
-              <Text style={styles.checkboxLabel}>
-                Add notes to completed cells (Technician name, timestamp, and remark)
-              </Text>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.checkboxLabel}>
+                  Add notes to done cells (who/when)
+                </Text>
+                <Text style={{ fontSize: 11, color: colors.textSecondary, marginTop: 2 }}>
+                  Excel shows a small red corner mark on cells with notes.
+                </Text>
+              </View>
             </TouchableOpacity>
 
             {/* Live Summary Callout */}

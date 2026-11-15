@@ -35,10 +35,12 @@ import PerformanceScreen from '../screens/admin/PerformanceScreen';
 import UsersScreen from '../screens/admin/UsersScreen';
 import ActivityLogsScreen from '../screens/admin/ActivityLogsScreen';
 import SettingsScreen from '../screens/admin/SettingsScreen';
+import AssignWorkersScreen from '../screens/admin/AssignWorkersScreen';
 
 import WebSidebar from '../components/WebSidebar';
 import LoadingSkeleton from '../components/LoadingSkeleton';
 import { PageErrorBoundary } from '../components/GlobalErrorBoundary';
+import { useWorkerGroupsRealtime } from '../hooks/useWorkerGroupsRealtime';
 import { colors, layout } from '../theme';
 
 const Stack = createNativeStackNavigator();
@@ -61,6 +63,7 @@ const webLinking = {
         screens: {
           AdminCalendar: 'admin/calendar',
           SetSchedule: 'admin/set-schedule',
+          AssignWorkers: 'admin/assign-workers',
           ManageEquipment: 'admin/equipment',
           Performance: 'admin/performance',
           Users: 'admin/users',
@@ -203,6 +206,8 @@ function AdminTabNavigator() {
 
 // --- WORKER MOBILE BOTTOM TABS ---
 function WorkerTabNavigator() {
+  const { user } = useAuth();
+  useWorkerGroupsRealtime({ workerUserId: user?.id });
   const insets = useSafeAreaInsets();
   const bottomInset = insets?.bottom || 0;
 
@@ -270,6 +275,7 @@ function withPageBoundary(Component, pageName) {
 
 const SafeScheduleCalendar = withPageBoundary(ScheduleCalendarScreen, 'Schedule Calendar');
 const SafeSetSchedule      = withPageBoundary(SetScheduleScreen,      'Set Schedule');
+const SafeAssignWorkers    = withPageBoundary(AssignWorkersScreen,    'Assign Workers');
 const SafeManageEquipment  = withPageBoundary(ManageEquipmentScreen,  'Equipment & Systems');
 const SafePerformance      = withPageBoundary(PerformanceScreen,      'Performance Report');
 const SafeUsers            = withPageBoundary(UsersScreen,            'User Roles');
@@ -279,6 +285,7 @@ const SafeWorkerToday      = withPageBoundary(TodayScreen,            'Worker Vi
 
 // --- ADMIN WEB CONTAINER (STACK NAVIGATOR + SIDEBAR) ---
 function ResponsiveAdminLayout({ navigation }) {
+  useWorkerGroupsRealtime(); // Mount realtime once for admin area
   const { width } = useWindowDimensions();
   const isDesktop = width >= 768;
   const isNarrow = width < 900;
@@ -352,6 +359,7 @@ function ResponsiveAdminLayout({ navigation }) {
         >
           <AdminWebStack.Screen name="AdminCalendar" component={SafeScheduleCalendar} />
           <AdminWebStack.Screen name="SetSchedule" component={SafeSetSchedule} />
+          <AdminWebStack.Screen name="AssignWorkers" component={SafeAssignWorkers} />
           <AdminWebStack.Screen name="ManageEquipment" component={SafeManageEquipment} />
           <AdminWebStack.Screen name="Performance" component={SafePerformance} />
           <AdminWebStack.Screen name="Users" component={SafeUsers} />
@@ -366,6 +374,8 @@ function ResponsiveAdminLayout({ navigation }) {
 }
 
 function ResponsiveWorkerLayout({ navigation }) {
+  const { user } = useAuth();
+  useWorkerGroupsRealtime({ workerUserId: user?.id });
   const { width } = useWindowDimensions();
   const isDesktop = width >= 768;
 

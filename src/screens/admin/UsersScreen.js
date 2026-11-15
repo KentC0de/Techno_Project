@@ -17,13 +17,18 @@ import { supabase, isConfigured } from '../../lib/supabase';
 import { fetchProfiles, updateProfileRole } from '../../lib/dataService';
 import Header from '../../components/Header';
 import PageContainer from '../../components/PageContainer';
+import WorkerGroupBadge from '../../components/WorkerGroupBadge';
+import WorkerGroupSelect from '../../components/WorkerGroupSelect';
+import { useWorkerGroups } from '../../hooks/useWorkerGroups';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
+import { useAction } from '../../hooks/useAction';
 import { colors } from '../../theme';
 
 export default function UsersScreen({ navigation }) {
   const { user: currentUser } = useAuth();
   const queryClient = useQueryClient();
   const { isDesktop, isSm } = useBreakpoint();
+  const runAction = useAction();
 
   // Active vs Archived Tabs
   const [activeTab, setActiveTab] = useState('active'); // 'active' | 'archived'
@@ -40,6 +45,13 @@ export default function UsersScreen({ navigation }) {
   const [targetUser, setTargetUser] = useState(null);
   const [disableReason, setDisableReason] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+
+  // Change worker group modal
+  const [groupModalVisible, setGroupModalVisible] = useState(false);
+  const [groupTargetUser, setGroupTargetUser] = useState(null);
+  const [selectedChangeGroupId, setSelectedChangeGroupId] = useState(null);
+
+  const { groups: workerGroupsList, groupByUser, refetch: refetchWorkerGroups } = useWorkerGroups();
 
   const showToast = (msg, type = 'success') => {
     setToastMessage(msg);
@@ -62,8 +74,9 @@ export default function UsersScreen({ navigation }) {
   useEffect(() => {
     if (!isConfigured || !supabase?.channel) return;
 
+    const channelId = `admin_users_rt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
-      .channel('admin_users_realtime')
+      .channel(channelId)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'profiles' },
@@ -149,38 +162,36 @@ export default function UsersScreen({ navigation }) {
   };
 
   // Execute Restore via RPC
-  const handleRestoreUser = async (profile) => {
-    const confirmed =
-      Platform.OS === 'web' && typeof window !== 'undefined'
-        ? window.confirm(`Restore ${profile.full_name || 'this worker'}? They will be allowed to log in again.`)
-        : true;
+  const handleRestoreUser = (profile) => {
+    runAction({
+      confirm: {
+        title: 'Restore Worker Account?',
+        message: `Restore ${profile.full_name || 'this worker'}? They will be allowed to log into the mobile app and perform tasks.`,
+        confirmText: 'Restore Account',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'person-add-outline',
+      },
+      loading: 'Restoring account...',
+      action: async () => {
+        const { error: rpcErr } = await supabase.rpc('admin_set_user_status', {
+          target: profile.id,
+          new_status: 'active',
+          reason: null,
+        });
 
-    if (!confirmed) return;
-
-    try {
-      setActionLoading(true);
-      const { error: rpcErr } = await supabase.rpc('admin_set_user_status', {
-        target: profile.id,
-        new_status: 'active',
-        reason: null,
-      });
-
-      if (rpcErr) {
-        if (rpcErr.message?.includes('function') || rpcErr.code === '42883') {
-          showToast('Run the settings SQL in Supabase to enable account management.', 'error');
-        } else {
-          showToast(rpcErr.message || 'Failed to restore user account.', 'error');
+        if (rpcErr) {
+          if (rpcErr.message?.includes('function') || rpcErr.code === '42883') {
+            throw new Error('Run the settings SQL in Supabase to enable account management.');
+          }
+          throw rpcErr;
         }
-        return;
-      }
-
-      queryClient.invalidateQueries({ queryKey: ['profiles'] });
-      showToast(`${profile.full_name || 'Worker'} restored to Active accounts.`);
-    } catch (err) {
-      showToast(err.message || 'An unexpected error occurred.', 'error');
-    } finally {
-      setActionLoading(false);
-    }
+      },
+      success: `${profile.full_name || 'Worker'} restored to Active accounts`,
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['profiles'] });
+      },
+    });
   };
 
   // Split Active vs Archived
@@ -420,11 +431,24 @@ export default function UsersScreen({ navigation }) {
                             Deactivated: {p.disabled_at ? p.disabled_at.slice(0, 10) : 'Recently'}
                             {p.disabled_reason ? ` • Reason: "${p.disabled_reason}"` : ''}
                           </Text>
+                          {groupByUser[p.id] && (
+                            <Text style={[styles.archivedReasonText, { color: '#DC2626', fontWeight: '700', marginTop: 2 }]}>
+                              Warning: This disabled worker still belongs to a worker group. Open Assign Workers to remove them.
+                            </Text>
+                          )}
                         </View>
                       ) : (
-                        <Text style={styles.createdText}>
-                          Active • Joined {p.created_at ? p.created_at.slice(0, 10) : 'recently'}
-                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                          <Text style={styles.createdText}>
+                            Active • Joined {p.created_at ? p.created_at.slice(0, 10) : 'recently'}
+                          </Text>
+                          {p.role === 'worker' && (
+                            <WorkerGroupBadge
+                              group={workerGroupsList.find((g) => g.id === groupByUser[p.id])}
+                              size="small"
+                            />
+                          )}
+                        </View>
                       )}
                     </View>
                   </View>
@@ -456,6 +480,22 @@ export default function UsersScreen({ navigation }) {
                           )}
                         </TouchableOpacity>
 
+                        {/* Quick Change Group (only for active workers) */}
+                        {!isAdmin && (
+                          <TouchableOpacity
+                            style={[styles.actionBtn, styles.groupChangeBtn]}
+                            onPress={() => {
+                              setGroupTargetUser(p);
+                              setSelectedChangeGroupId(groupByUser[p.id] || null);
+                              setGroupModalVisible(true);
+                            }}
+                            activeOpacity={0.8}
+                          >
+                            <Ionicons name="people-outline" size={14} color={colors.primary} />
+                            <Text style={styles.groupChangeBtnText}>Group</Text>
+                          </TouchableOpacity>
+                        )}
+
                         {/* Disable button (only for workers, never for admins or yourself) */}
                         {!isAdmin && (
                           <TouchableOpacity
@@ -485,6 +525,87 @@ export default function UsersScreen({ navigation }) {
             })}
           </View>
         )}
+
+        {/* Modal: Quick Change Worker Group */}
+        <Modal
+          visible={groupModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setGroupModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <Ionicons name="people" size={24} color={colors.primary} />
+                <Text style={styles.modalTitle}>Change Worker Group</Text>
+              </View>
+
+              <Text style={styles.modalSub}>
+                Assign <Text style={{ fontWeight: '700' }}>{groupTargetUser?.full_name}</Text> to a worker team.
+              </Text>
+
+              <View style={{ marginVertical: 12 }}>
+                <WorkerGroupSelect
+                  selectedGroupId={selectedChangeGroupId}
+                  onSelectGroup={setSelectedChangeGroupId}
+                  allowUnassigned={true}
+                />
+              </View>
+
+              <View style={styles.modalBtnRow}>
+                <TouchableOpacity
+                  style={styles.modalCancelBtn}
+                  onPress={() => setGroupModalVisible(false)}
+                >
+                  <Text style={styles.modalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.modalDisableBtn, { backgroundColor: colors.primary }]}
+                  onPress={() => {
+                    if (!groupTargetUser) return;
+                    setGroupModalVisible(false);
+
+                    const targetGroup = workerGroupsList.find((g) => g.id === selectedChangeGroupId);
+                    runAction({
+                      confirm: {
+                        title: 'Update Worker Group?',
+                        message: selectedChangeGroupId
+                          ? `Assign ${groupTargetUser.full_name} to "${targetGroup?.name || 'group'}"?`
+                          : `Remove ${groupTargetUser.full_name} from their worker group?`,
+                        confirmText: 'Confirm',
+                        cancelText: 'Cancel',
+                        tone: selectedChangeGroupId ? 'default' : 'danger',
+                        icon: 'people-outline',
+                      },
+                      loading: 'Updating worker group...',
+                      action: async () => {
+                        const { error } = await supabase.rpc('assign_worker_to_group', {
+                          p_user_id: groupTargetUser.id,
+                          p_group_id: selectedChangeGroupId || null,
+                        });
+                        if (error) {
+                          if (error.code === '42883' || error.code === 'PGRST202') {
+                            throw new Error('Run the worker groups SQL in Supabase');
+                          }
+                          throw error;
+                        }
+                      },
+                      success: `Updated group for ${groupTargetUser.full_name}`,
+                      onSuccess: () => {
+                        refetchWorkerGroups();
+                        queryClient.invalidateQueries({ queryKey: ['worker_group_members'] });
+                        queryClient.invalidateQueries({ queryKey: ['profiles'] });
+                      },
+                    });
+                  }}
+                >
+                  <Text style={styles.modalDisableBtnText}>Save Group</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         {/* Modal: Disable Worker Confirmation */}
         <Modal
@@ -814,6 +935,15 @@ const styles = StyleSheet.create({
   roleSwitchBtn: {
     backgroundColor: colors.primaryVeryLight,
     borderColor: 'rgba(14, 165, 233, 0.25)',
+  },
+  groupChangeBtn: {
+    backgroundColor: '#F8FAFC',
+    borderColor: colors.border,
+  },
+  groupChangeBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primary,
   },
   roleSwitchText: {
     fontSize: 12,

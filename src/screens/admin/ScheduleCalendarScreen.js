@@ -40,12 +40,25 @@ import { useBreakpoint } from '../../hooks/useBreakpoint';
 import FrequencyBadge from '../../components/FrequencyBadge';
 import StatusBadge from '../../components/StatusBadge';
 import ExportScheduleModal from '../../components/ExportScheduleModal';
+import WorkerGroupBadge from '../../components/WorkerGroupBadge';
+import WorkerGroupSelect from '../../components/WorkerGroupSelect';
+import { useWorkerGroups } from '../../hooks/useWorkerGroups';
+import { useWorkers } from '../../hooks/useWorkers';
+import { useAction } from '../../hooks/useAction';
 import { colors, layout } from '../../theme';
+
+function getInitials(name) {
+  if (!name) return '??';
+  const parts = name.trim().split(/\s+/);
+  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
+  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+}
 
 export default function ScheduleCalendarScreen({ navigation }) {
   const { user } = useAuth();
   const { selectedSystem, setSelectedSystem } = useSystemFilter();
   const queryClient = useQueryClient();
+  const runAction = useAction();
   const [viewMode, setViewMode] = useState('week'); // 'week' | 'month'
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
   const [selectedDayStr, setSelectedDayStr] = useState(formatDate(new Date()));
@@ -93,8 +106,9 @@ export default function ScheduleCalendarScreen({ navigation }) {
   useEffect(() => {
     if (!isConfigured || !supabase?.channel) return;
 
+    const channelId = `task_logs_${rangeStart}_${rangeEnd}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
-      .channel(`task_logs_${rangeStart}_${rangeEnd}`)
+      .channel(channelId)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'task_logs' },
@@ -136,7 +150,18 @@ export default function ScheduleCalendarScreen({ navigation }) {
   const [editEndDate, setEditEndDate] = useState('');
   const [editWeekday, setEditWeekday] = useState(1);
   const [editNotes, setEditNotes] = useState('');
+  const [editGroupId, setEditGroupId] = useState(null);
+  const [selectedTaskIds, setSelectedTaskIds] = useState(new Set());
+  const [bulkGroupModalVisible, setBulkGroupModalVisible] = useState(false);
+  const [bulkTargetGroupId, setBulkTargetGroupId] = useState(null);
   const [modalSaving, setModalSaving] = useState(false);
+
+  // Worker Groups & Workers
+  const { groups: workerGroupsList } = useWorkerGroups();
+  const { data: workerData } = useWorkers();
+
+  // Filter by Assigned Group: 'ALL' | 'UNASSIGNED' | groupId
+  const [groupFilter, setGroupFilter] = useState('ALL');
 
   // Navigate dates
   const handlePrev = () => {
@@ -177,43 +202,85 @@ export default function ScheduleCalendarScreen({ navigation }) {
     setEditEndDate(rule.end_date || '');
     setEditWeekday(rule.weekday ? Number(rule.weekday) : 1);
     setEditNotes(rule.notes || '');
+
+    // Prefill assigned group from rule
+    setEditGroupId(rule.worker_group_id || null);
     setEditModalVisible(true);
   };
 
-  const handleSaveEditRule = async () => {
+  const handleSaveEditRule = () => {
     if (!editingRule) return;
-    try {
-      setModalSaving(true);
-      await updateScheduleRule(editingRule.id, {
-        frequency: editFreq,
-        start_date: editStartDate,
-        end_date: editEndDate.trim() ? editEndDate.trim() : null,
-        weekday: editFreq === 'w' ? editWeekday : null,
-        notes: editNotes.trim() ? editNotes.trim() : null,
-      });
-      setEditModalVisible(false);
-      queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
-    } catch (err) {
-      alert(err.message || 'Failed to update rule.');
-    } finally {
-      setModalSaving(false);
-    }
+
+    const chosenGroup = workerGroupsList.find((g) => g.id === editGroupId);
+    const isUnassigning = !editGroupId;
+
+    runAction({
+      confirm: {
+        title: 'Save Schedule Rule?',
+        message: isUnassigning
+          ? 'Save changes with no worker group assigned? Nobody will see this task until it is assigned.'
+          : `Update schedule rule and assign to "${chosenGroup?.name || 'Worker Group'}"?`,
+        confirmText: 'Save Changes',
+        cancelText: 'Cancel',
+        tone: isUnassigning ? 'danger' : 'default',
+        icon: 'create-outline',
+      },
+      loading: 'Saving schedule rule...',
+      action: async () => {
+        // 1. Update rule basic fields
+        await updateScheduleRule(editingRule.id, {
+          frequency: editFreq,
+          start_date: editStartDate,
+          end_date: editEndDate.trim() ? editEndDate.trim() : null,
+          weekday: editFreq === 'w' ? editWeekday : null,
+          notes: editNotes.trim() ? editNotes.trim() : null,
+        });
+
+        // 2. Update assigned worker group via set_rules_group RPC
+        if (isConfigured && supabase) {
+          const { error: groupErr } = await supabase.rpc('set_rules_group', {
+            p_rule_ids: [editingRule.id],
+            p_group_id: editGroupId || null,
+          });
+
+          if (groupErr) {
+            if (groupErr.code === '42883' || groupErr.code === 'PGRST202') {
+              throw new Error('Run the worker groups SQL in Supabase');
+            }
+            throw groupErr;
+          }
+        }
+      },
+      success: 'Schedule rule updated successfully',
+      onSuccess: () => {
+        setEditModalVisible(false);
+        queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
+        queryClient.invalidateQueries({ queryKey: ['schedule_rules_all'] });
+        queryClient.invalidateQueries({ queryKey: ['recent_schedule_rules'] });
+      },
+    });
   };
 
-  const handleDeleteRule = async (ruleId) => {
-    const confirmed =
-      typeof window !== 'undefined' && window.confirm
-        ? window.confirm('Are you sure you want to delete this schedule rule?')
-        : true;
-
-    if (!confirmed) return;
-
-    try {
-      await deleteScheduleRule(ruleId);
-      queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
-    } catch (err) {
-      alert(err.message || 'Failed to delete rule.');
-    }
+  const handleDeleteRule = (ruleId) => {
+    runAction({
+      confirm: {
+        title: 'Delete this task?',
+        message: 'This schedule rule and all future recurrences will be removed. This cannot be undone.',
+        confirmText: 'Delete',
+        cancelText: 'Cancel',
+        tone: 'danger',
+        icon: 'trash-outline',
+      },
+      loading: 'Deleting schedule rule...',
+      action: async () => {
+        await deleteScheduleRule(ruleId);
+      },
+      success: 'Schedule rule deleted successfully',
+      onSuccess: () => {
+        queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
+        queryClient.invalidateQueries({ queryKey: ['schedule_rules_all'] });
+      },
+    });
   };
 
   // Build Month Grid
@@ -389,8 +456,20 @@ export default function ScheduleCalendarScreen({ navigation }) {
     );
   };
 
-  // Tasks for the selected day
-  const selectedDayTasks = tasks.filter((t) => t.due_date === selectedDayStr);
+  // Tasks for the selected day, optionally filtered by assigned group
+  const selectedDayTasks = tasks.filter((t) => {
+    if (t.due_date !== selectedDayStr) return false;
+
+    if (groupFilter === 'ALL') return true;
+
+    const gId = t.rule?.worker_group_id || t.worker_group_id;
+
+    if (groupFilter === 'UNASSIGNED') {
+      return !gId;
+    }
+
+    return gId === groupFilter;
+  });
   const weekNum = getWorkWeekNumber(currentDateStr);
   const monthInfo = getMonthRange(currentDateStr);
 
@@ -492,12 +571,76 @@ export default function ScheduleCalendarScreen({ navigation }) {
         {/* Selected Day Task List */}
         <View style={styles.dayTasksSection}>
           <View style={styles.dayTasksHeader}>
-            <Text style={styles.dayTasksHeading}>
-              Tasks Scheduled for {selectedDayStr}
-            </Text>
-            <Text style={styles.dayTasksSub}>
-              {selectedDayTasks.length} {selectedDayTasks.length === 1 ? 'task' : 'tasks'}
-            </Text>
+            <View>
+              <Text style={styles.dayTasksHeading}>
+                Tasks Scheduled for {selectedDayStr}
+              </Text>
+              <Text style={styles.dayTasksSub}>
+                {selectedDayTasks.length} {selectedDayTasks.length === 1 ? 'task' : 'tasks'}
+              </Text>
+            </View>
+
+            {/* Assigned Worker Group filter pills */}
+            <View style={styles.assigneeFilterBar}>
+              <Text style={styles.assigneeFilterLabel}>Worker Group:</Text>
+              <TouchableOpacity
+                style={[
+                  styles.assigneeFilterPill,
+                  groupFilter === 'ALL' && styles.assigneeFilterPillActive,
+                ]}
+                onPress={() => setGroupFilter('ALL')}
+              >
+                <Text
+                  style={[
+                    styles.assigneeFilterText,
+                    groupFilter === 'ALL' && styles.assigneeFilterTextActive,
+                  ]}
+                >
+                  All
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[
+                  styles.assigneeFilterPill,
+                  groupFilter === 'UNASSIGNED' && styles.assigneeFilterPillActive,
+                ]}
+                onPress={() => setGroupFilter('UNASSIGNED')}
+              >
+                <Text
+                  style={[
+                    styles.assigneeFilterText,
+                    groupFilter === 'UNASSIGNED' && styles.assigneeFilterTextActive,
+                  ]}
+                >
+                  Unassigned
+                </Text>
+              </TouchableOpacity>
+              {workerGroupsList.map((g) => {
+                const isSelected = groupFilter === g.id;
+                return (
+                  <TouchableOpacity
+                    key={g.id}
+                    style={[
+                      styles.assigneeFilterPill,
+                      isSelected && styles.assigneeFilterPillActive,
+                    ]}
+                    onPress={() => setGroupFilter(g.id)}
+                  >
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                      <View style={[styles.filterGroupDot, { backgroundColor: g.color || colors.primary }]} />
+                      <Text
+                        style={[
+                          styles.assigneeFilterText,
+                          isSelected && styles.assigneeFilterTextActive,
+                        ]}
+                      >
+                        {g.name}
+                      </Text>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
           </View>
 
           {selectedDayTasks.length === 0 ? (
@@ -521,46 +664,54 @@ export default function ScheduleCalendarScreen({ navigation }) {
               )}
             </View>
           ) : (
-            selectedDayTasks.map((t) => (
-              <View key={t.id} style={styles.ruleCard}>
-                <View style={styles.ruleCardTop}>
-                  <View style={styles.badgeLine}>
-                    <FrequencyBadge freq={t.frequency} size="medium" />
-                    <View style={styles.ruleNameBox}>
-                      <Text style={styles.ruleEqName}>{t.equipment?.name || 'Equipment'}</Text>
-                      <Text style={styles.ruleGroupName}>
-                        {t.category?.code}. {t.category?.name} • {t.group?.name}
-                        {t.equipment?.area ? ` (${t.equipment.area})` : ''}
-                      </Text>
+            selectedDayTasks.map((t) => {
+              return (
+                <View key={t.id} style={styles.ruleCard}>
+                  <View style={styles.ruleCardTop}>
+                    <View style={styles.badgeLine}>
+                      <FrequencyBadge freq={t.frequency} size="medium" />
+                      <View style={styles.ruleNameBox}>
+                        <Text style={styles.ruleEqName}>{t.equipment?.name || 'Equipment'}</Text>
+                        <Text style={styles.ruleGroupName}>
+                          {t.category?.code}. {t.category?.name} • {t.group?.name}
+                          {t.equipment?.area ? ` (${t.equipment.area})` : ''}
+                        </Text>
+                      </View>
                     </View>
+                    <StatusBadge status={t.status} />
                   </View>
-                  <StatusBadge status={t.status} />
+
+                  {/* Worker Group Row */}
+                  <View style={styles.cardAssigneesRow}>
+                    <Text style={styles.cardAssigneesLabel}>Worker Group:</Text>
+                    <WorkerGroupBadge group={t.rule?.worker_group || t.worker_group} />
+                  </View>
+
+                  {t.notes ? (
+                    <Text style={styles.ruleCardNotes}>Admin Note: {t.notes}</Text>
+                  ) : null}
+
+                  {/* Edit & Delete actions for Admin */}
+                  <View style={styles.ruleActionsRow}>
+                    <TouchableOpacity
+                      style={styles.ruleActionEdit}
+                      onPress={() => openEditRule(t.rule)}
+                    >
+                      <Ionicons name="create-outline" size={16} color={colors.primaryDark} />
+                      <Text style={styles.ruleActionEditText}>Edit Rule & Workers</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.ruleActionDelete}
+                      onPress={() => handleDeleteRule(t.rule_id)}
+                    >
+                      <Ionicons name="trash-outline" size={16} color={colors.danger} />
+                      <Text style={styles.ruleActionDeleteText}>Delete Rule</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-
-                {t.notes ? (
-                  <Text style={styles.ruleCardNotes}>Admin Note: {t.notes}</Text>
-                ) : null}
-
-                {/* Edit & Delete actions for Admin */}
-                <View style={styles.ruleActionsRow}>
-                  <TouchableOpacity
-                    style={styles.ruleActionEdit}
-                    onPress={() => openEditRule(t.rule)}
-                  >
-                    <Ionicons name="create-outline" size={16} color={colors.primaryDark} />
-                    <Text style={styles.ruleActionEditText}>Edit Rule</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.ruleActionDelete}
-                    onPress={() => handleDeleteRule(t.rule_id)}
-                  >
-                    <Ionicons name="trash-outline" size={16} color={colors.danger} />
-                    <Text style={styles.ruleActionDeleteText}>Delete Rule</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            ))
+              );
+            })
           )}
         </View>
 
@@ -657,6 +808,17 @@ export default function ScheduleCalendarScreen({ navigation }) {
                   value={editNotes}
                   onChangeText={setEditNotes}
                   multiline
+                />
+
+                {/* Worker Group assignment in Edit Rule modal */}
+                <Text style={[styles.modalFieldLabel, { marginTop: 16 }]}>
+                  Assign to Worker Group
+                </Text>
+                <WorkerGroupSelect
+                  selectedGroupId={editGroupId}
+                  onSelectGroup={setEditGroupId}
+                  allowUnassigned={true}
+                  disabled={modalSaving}
                 />
 
                 <View style={styles.modalBtnRow}>
@@ -1120,6 +1282,11 @@ const styles = StyleSheet.create({
     color: colors.danger,
     marginLeft: 4,
   },
+  filterGroupDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
   modalOverlay: {
     flex: 1,
     backgroundColor: 'rgba(0,0,0,0.6)',
@@ -1300,6 +1467,97 @@ const styles = StyleSheet.create({
     borderTopWidth: 1,
     borderTopColor: colors.borderLight,
     paddingTop: 8,
+  },
+  // Assignee filter bar
+  assigneeFilterBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  assigneeFilterLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  assigneeFilterPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+  },
+  assigneeFilterPillActive: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  assigneeFilterText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textDark,
+  },
+  assigneeFilterTextActive: {
+    color: colors.white,
+  },
+  // Card assignees
+  cardAssigneesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: '#F1F5F9',
+  },
+  cardAssigneesLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
+  unassignedChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: '#F0F9FF',
+  },
+  unassignedChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.primaryDark,
+  },
+  cardAvatarGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flex: 1,
+  },
+  cardMiniAvatar: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#0284C7',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cardMiniAvatarText: {
+    fontSize: 9,
+    fontWeight: '700',
+    color: colors.white,
+  },
+  cardMoreAssignees: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textMuted,
+  },
+  cardAssigneeNames: {
+    fontSize: 12,
+    color: colors.textDark,
+    fontWeight: '600',
+    marginLeft: 4,
   },
   // Day Overview Panel Card
   overviewCard: {

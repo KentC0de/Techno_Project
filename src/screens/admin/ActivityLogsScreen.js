@@ -223,8 +223,9 @@ export default function ActivityLogsScreen({ navigation }) {
   useEffect(() => {
     if (!isConfigured || !supabase?.channel) return;
 
+    const channelId = `activity_logs_feed_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
-      .channel('activity_logs_feed')
+      .channel(channelId)
       .on(
         'postgres_changes',
         { event: 'INSERT', schema: 'public', table: 'activity_logs' },

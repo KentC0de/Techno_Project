@@ -4,6 +4,9 @@
  */
 import { formatDate, parseDate, addDays, getIsoWeekday, getWorkWeekNumber, daysInMonth } from './schedule';
 
+// Cell fill color constant for day cells: ONLY light green for done tasks; all other cells have NO fill (white).
+export const DONE_FILL = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFC6EFCE' } };     // light green
+
 const isWeb = typeof window !== 'undefined';
 
 // Lazy loader for ExcelJS to avoid bundling it initially
@@ -208,7 +211,6 @@ export async function generateMasterScheduleWorkbook({
   siteName = '',
   revisionLabel = 'REV A',
   selectedSystemCode = 'ALL',
-  showPlanned = true,
   addNotes = true,
 }) {
   const ExcelJS = await getExcelJS();
@@ -621,12 +623,11 @@ export async function generateMasterScheduleWorkbook({
               const log = logMap.get(key);
               const status = log ? log.status : 'pending';
 
-              if (status === 'done') {
-                cell.value = activeRule.frequency;
-                cell.fill = fillLightGreenC2;
-                cell.font = { name: fontName, size: 10, bold: true, color: { argb: 'FF196B24' } };
-                cell.alignment = { horizontal: 'center', vertical: 'middle' };
+              // Day cells have NO text at all (no letters, no symbols); meaning is indicated by fill color only
+              cell.value = '';
 
+              if (status === 'done') {
+                cell.fill = DONE_FILL;
                 if (addNotes) {
                   const workerName = (log.done_by && profileMap?.get(log.done_by)) || 'Technician';
                   const doneAt = log.done_at ? log.done_at.replace('T', ' ').substring(0, 16) : day.dateStr;
@@ -635,38 +636,20 @@ export async function generateMasterScheduleWorkbook({
                   cell.note = noteText;
                 }
               } else if (status === 'issue') {
-                cell.value = '!';
-                cell.fill = fillIssueOrange;
-                cell.font = { name: fontName, size: 12, bold: true, color: { argb: 'FFD97706' } };
-                cell.alignment = { horizontal: 'center', vertical: 'middle' };
-
+                // Issue reported has NO fill (white); note only
                 if (addNotes) {
                   const workerName = (log.done_by && profileMap?.get(log.done_by)) || 'Technician';
-                  let noteText = `Issue reported by ${workerName}`;
-                  if (log.notes) noteText += `\nDetails: ${log.notes}`;
+                  let noteText = `Issue: ${log.notes || 'Issue reported'}`;
+                  if (workerName) noteText += ` (${workerName})`;
                   cell.note = noteText;
                 }
               } else if (status === 'skipped') {
-                cell.value = '-';
-                cell.fill = fillSkippedGrey;
-                cell.font = { name: fontName, size: 11, bold: true, color: { argb: 'FF71717A' } };
-                cell.alignment = { horizontal: 'center', vertical: 'middle' };
-
-                if (addNotes && log.notes) {
-                  cell.note = `Skipped: ${log.notes}`;
+                // Skipped has NO fill (white); note only
+                if (addNotes) {
+                  cell.note = log.notes ? `Skipped: ${log.notes}` : 'Skipped';
                 }
-              } else if (showPlanned) {
-                // Pending planned task
-                cell.value = activeRule.frequency;
-                const isOverdue = day.dateStr < todayStr;
-                cell.font = {
-                  name: fontName,
-                  size: 9,
-                  bold: false,
-                  color: isOverdue ? { argb: 'FFFF0000' } : { argb: 'FF888888' },
-                };
-                cell.alignment = { horizontal: 'center', vertical: 'middle' };
               }
+              // Scheduled, overdue, and days without a task have NO fill (white)
             }
           });
         });
@@ -783,42 +766,15 @@ export async function generateMasterScheduleWorkbook({
     const legRow2 = ws.getRow(curRowIdx);
     legRow2.height = 18;
 
-    // Small status indicator badges
+    // Legend has ONE colored square (light green) with label "Done"
     const cDone = ws.getCell(curRowIdx, 4);
-    cDone.value = '   ';
-    cDone.fill = fillLightGreenC2;
+    cDone.value = '';
+    cDone.fill = DONE_FILL;
     cDone.border = { top: borderThin, bottom: borderThin, left: borderThin, right: borderThin };
 
     const cDoneLbl = ws.getCell(curRowIdx, 5);
     cDoneLbl.value = 'Done';
     cDoneLbl.font = { name: fontName, size: 10, bold: true };
-
-    const cIssue = ws.getCell(curRowIdx, 7);
-    cIssue.value = '   ';
-    cIssue.fill = fillIssueOrange;
-    cIssue.border = { top: borderThin, bottom: borderThin, left: borderThin, right: borderThin };
-
-    const cIssueLbl = ws.getCell(curRowIdx, 8);
-    cIssueLbl.value = 'Issue reported';
-    cIssueLbl.font = { name: fontName, size: 10, bold: true };
-
-    const cSkip = ws.getCell(curRowIdx, 11);
-    cSkip.value = '   ';
-    cSkip.fill = fillSkippedGrey;
-    cSkip.border = { top: borderThin, bottom: borderThin, left: borderThin, right: borderThin };
-
-    const cSkipLbl = ws.getCell(curRowIdx, 12);
-    cSkipLbl.value = 'Skipped';
-    cSkipLbl.font = { name: fontName, size: 10, bold: true };
-
-    const cOverdue = ws.getCell(curRowIdx, 15);
-    cOverdue.value = 'd';
-    cOverdue.font = { name: fontName, size: 11, bold: true, color: { argb: 'FFFF0000' } };
-    cOverdue.alignment = { horizontal: 'center' };
-
-    const cOverdueLbl = ws.getCell(curRowIdx, 16);
-    cOverdueLbl.value = 'Overdue';
-    cOverdueLbl.font = { name: fontName, size: 10, bold: true };
   });
 
   return wb;

@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { supabase } from '../../lib/supabase';
+import { supabase, isConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
 import {
   fetchCategories,
@@ -76,8 +76,11 @@ export default function PerformanceScreen({ navigation }) {
 
   // Realtime subscription for task_logs invalidation
   useEffect(() => {
+    if (!isConfigured || !supabase?.channel) return;
+
+    const channelId = `perf_task_logs_${rangeStart}_${rangeEnd}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
-      .channel(`perf-task-logs-${rangeStart}-${rangeEnd}`)
+      .channel(channelId)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'task_logs' },

@@ -9,6 +9,7 @@ import { SidebarProvider } from './src/context/SidebarContext';
 import { SystemFilterProvider } from './src/context/SystemFilterContext';
 import { ConnectionStatusProvider } from './src/context/ConnectionStatusContext';
 import { GlobalErrorBoundary } from './src/components/GlobalErrorBoundary';
+import { FeedbackProvider } from './src/components/feedback';
 import AppNavigator from './src/navigation/AppNavigator';
 
 export default function App() {
@@ -16,18 +17,20 @@ export default function App() {
     <GlobalErrorBoundary>
       <QueryClientProvider client={queryClient}>
         <SafeAreaProvider>
-          <AppSettingsProvider>
-            <AuthProvider>
-              <ConnectionStatusProvider>
-                <SidebarProvider>
-                  <SystemFilterProvider>
-                    <StatusBar style="light" backgroundColor="#0A0A0A" />
-                    <AppNavigator />
-                  </SystemFilterProvider>
-                </SidebarProvider>
-              </ConnectionStatusProvider>
-            </AuthProvider>
-          </AppSettingsProvider>
+          <FeedbackProvider>
+            <AppSettingsProvider>
+              <AuthProvider>
+                <ConnectionStatusProvider>
+                  <SidebarProvider>
+                    <SystemFilterProvider>
+                      <StatusBar style="light" backgroundColor="#0A0A0A" />
+                      <AppNavigator />
+                    </SystemFilterProvider>
+                  </SidebarProvider>
+                </ConnectionStatusProvider>
+              </AuthProvider>
+            </AppSettingsProvider>
+          </FeedbackProvider>
         </SafeAreaProvider>
       </QueryClientProvider>
     </GlobalErrorBoundary>

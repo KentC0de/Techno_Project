@@ -15,6 +15,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useAuth } from '../context/AuthContext';
 import { useSidebar } from '../context/SidebarContext';
 import { useSystemFilter } from '../context/SystemFilterContext';
+import { useAction } from '../hooks/useAction';
 import { fetchScheduleRules, fetchTaskLogs } from '../lib/dataService';
 import {
   formatDate,
@@ -27,6 +28,7 @@ import { colors } from '../theme';
 const ROUTE_LABELS = {
   AdminCalendar: 'Schedule Calendar • Solar PM Hub',
   SetSchedule: 'Set Schedule • Solar PM Hub',
+  AssignWorkers: 'Assign Workers • Solar PM Hub',
   ManageEquipment: 'Equipment & Systems • Solar PM Hub',
   Performance: 'Performance Report • Solar PM Hub',
   Users: 'User Roles • Solar PM Hub',
@@ -47,6 +49,7 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
   const isAdmin = user?.role === 'admin';
   const { isCollapsed, toggleCollapse } = useSidebar();
   const { selectedSystem, setSelectedSystem, systemOptions } = useSystemFilter();
+  const runAction = useAction();
 
   const [systemsGroupOpen, setSystemsGroupOpen] = useState(true);
   const [systemDropdownOpen, setSystemDropdownOpen] = useState(false);
@@ -108,16 +111,21 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
   }, [rules, weekLogs, currentWeek, todayStr]);
 
   const handleSignOut = () => {
-    if (Platform.OS === 'web' && typeof window !== 'undefined') {
-      if (window.confirm('Are you sure you want to sign out?')) {
-        signOut();
-      }
-    } else {
-      Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign Out', style: 'destructive', onPress: signOut },
-      ]);
-    }
+    runAction({
+      confirm: {
+        title: 'Sign Out?',
+        message: 'Are you sure you want to end your session?',
+        confirmText: 'Sign out',
+        cancelText: 'Stay signed in',
+        tone: 'danger',
+        icon: 'log-out-outline',
+      },
+      loading: 'Signing out...',
+      action: async () => {
+        await signOut();
+      },
+      success: 'Signed out successfully',
+    });
   };
 
   const currentSystemObj = systemOptions.find((s) => s.id === selectedSystem) || systemOptions[0];
@@ -134,6 +142,11 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
       key: 'SetSchedule',
       label: 'Set Schedule',
       icon: 'create-outline',
+    },
+    {
+      key: 'AssignWorkers',
+      label: 'Assign Workers',
+      icon: 'people-circle-outline',
     },
     {
       key: 'ManageEquipment',

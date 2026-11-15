@@ -360,6 +360,7 @@ export async function fetchScheduleRules(filter = null) {
         .from('schedule_rules')
         .select(`
           *,
+          worker_group:worker_groups(*),
           equipment:equipment(
             id,
             group_id,
@@ -683,10 +684,30 @@ export async function updateProfileRole(id, role) {
   return updateProfile(id, { role });
 }
 
-export async function getSavedWorkerSelection() {
-  return await getStored(STORAGE_KEYS.WORKER_SELECTION, { categoryId: null, area: null });
+export async function getSavedWorkerSelection(userId = null) {
+  try {
+    const key = userId
+      ? `${STORAGE_KEYS.WORKER_SELECTION}_${userId}`
+      : STORAGE_KEYS.WORKER_SELECTION;
+    const res = await getStored(key, null);
+    if (!res && userId) {
+      // fallback to legacy key if user-specific key not yet saved
+      return await getStored(STORAGE_KEYS.WORKER_SELECTION, null);
+    }
+    return res || null;
+  } catch (err) {
+    if (__DEV__) console.log('[getSavedWorkerSelection error]', err);
+    return null;
+  }
 }
 
-export async function saveWorkerSelection(selection) {
-  await setStored(STORAGE_KEYS.WORKER_SELECTION, selection);
+export async function saveWorkerSelection(selection, userId = null) {
+  try {
+    const key = userId
+      ? `${STORAGE_KEYS.WORKER_SELECTION}_${userId}`
+      : STORAGE_KEYS.WORKER_SELECTION;
+    await setStored(key, selection);
+  } catch (err) {
+    if (__DEV__) console.log('[saveWorkerSelection error]', err);
+  }
 }

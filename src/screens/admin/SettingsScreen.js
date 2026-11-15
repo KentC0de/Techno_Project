@@ -18,6 +18,7 @@ import { logActivity } from '../../lib/activityLog';
 import Header from '../../components/Header';
 import PageContainer from '../../components/PageContainer';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
+import { useAction } from '../../hooks/useAction';
 import { colors } from '../../theme';
 
 function getPasswordStrength(password) {
@@ -38,6 +39,7 @@ export default function SettingsScreen({ navigation }) {
   const { user } = useAuth();
   const { settings, updateSettings } = useAppSettings();
   const { isDesktop } = useBreakpoint();
+  const runAction = useAction();
 
   // Password change state
   const [currentPassword, setCurrentPassword] = useState('');
@@ -111,24 +113,38 @@ export default function SettingsScreen({ navigation }) {
         throw new Error('Current password is incorrect.');
       }
 
-      // Update password
-      const { error: updateErr } = await supabase.auth.updateUser({
-        password: newPassword,
+      // Update password with confirmation and loader
+      runAction({
+        confirm: {
+          title: 'Update Password?',
+          message: 'Are you sure you want to change your administrator account password?',
+          confirmText: 'Change Password',
+          cancelText: 'Cancel',
+          tone: 'default',
+          icon: 'key-outline',
+        },
+        loading: 'Updating password...',
+        action: async () => {
+          const { error: updateErr } = await supabase.auth.updateUser({
+            password: newPassword,
+          });
+
+          if (updateErr) {
+            throw updateErr;
+          }
+
+          // Audit log password change
+          await logActivity('auth.password_changed', 'user', user.id, {
+            summary: `${user.full_name || 'Admin'} changed account password`,
+          });
+        },
+        success: 'Password updated successfully',
+        onSuccess: () => {
+          setCurrentPassword('');
+          setNewPassword('');
+          setConfirmPassword('');
+        },
       });
-
-      if (updateErr) {
-        throw updateErr;
-      }
-
-      // Audit log password change
-      await logActivity('auth.password_changed', 'user', user.id, {
-        summary: `${user.full_name || 'Admin'} changed account password`,
-      });
-
-      setPassSuccess('Password updated successfully.');
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
     } catch (err) {
       setPassError(err.message || 'Failed to update password.');
     } finally {
@@ -139,40 +155,49 @@ export default function SettingsScreen({ navigation }) {
   // Handle maintenance switch toggle
   const handleToggleMaintenance = (nextVal) => {
     if (nextVal) {
-      const confirmed =
-        Platform.OS === 'web' && typeof window !== 'undefined'
-          ? window.confirm(
-              'Turn ON Maintenance Mode?\n\nField workers will be logged out and blocked from using the mobile app until you turn it off. Admins can still use this web console.'
-            )
-          : true;
-
-      if (!confirmed) return;
+      runAction({
+        confirm: {
+          title: 'Turn ON Maintenance Mode?',
+          message:
+            'Field workers will be logged out and blocked from using the mobile app until you turn it off. Admins can still use this web console.',
+          confirmText: 'Turn ON Maintenance',
+          cancelText: 'Cancel',
+          tone: 'danger',
+          icon: 'warning-outline',
+        },
+        action: async () => {
+          setMaintenanceMode(true);
+        },
+      });
+    } else {
+      setMaintenanceMode(false);
     }
-    setMaintenanceMode(nextVal);
   };
 
   // Handle save maintenance settings
-  const handleSaveSettings = async () => {
-    setMaintError('');
-    setMaintSuccess('');
-
-    try {
-      setMaintLoading(true);
-      await updateSettings(
-        {
-          maintenance_mode: maintenanceMode,
-          maintenance_message: maintenanceMsg.trim(),
-          support_contact: supportContact.trim(),
-        },
-        user?.full_name || 'Admin'
-      );
-      setMaintSuccess('Plant maintenance settings saved successfully.');
-      setTimeout(() => setMaintSuccess(''), 4000);
-    } catch (err) {
-      setMaintError(err.message || 'Failed to save settings. Run settings SQL in Supabase.');
-    } finally {
-      setMaintLoading(false);
-    }
+  const handleSaveSettings = () => {
+    runAction({
+      confirm: {
+        title: 'Save Application Settings?',
+        message: `Save updated plant maintenance status (${maintenanceMode ? 'ENABLED' : 'DISABLED'}) and support contact info?`,
+        confirmText: 'Save Settings',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'cog-outline',
+      },
+      loading: 'Saving application settings...',
+      action: async () => {
+        await updateSettings(
+          {
+            maintenance_mode: maintenanceMode,
+            maintenance_message: maintenanceMsg.trim(),
+            support_contact: supportContact.trim(),
+          },
+          user?.full_name || 'Admin'
+        );
+      },
+      success: 'Plant maintenance settings saved successfully',
+    });
   };
 
   const strength = getPasswordStrength(newPassword);

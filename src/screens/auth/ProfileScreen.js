@@ -15,7 +15,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
 import { supabase, isConfigured } from '../../lib/supabase';
-import { getSavedWorkerSelection } from '../../lib/dataService';
+import { getSavedWorkerSelection, fetchScheduleRules } from '../../lib/dataService';
+import WorkerGroupBadge from '../../components/WorkerGroupBadge';
+import { useWorkerGroups } from '../../hooks/useWorkerGroups';
+import { useAction } from '../../hooks/useAction';
 import { colors } from '../../theme';
 
 export default function ProfileScreen({ navigation }) {
@@ -26,7 +29,13 @@ export default function ProfileScreen({ navigation }) {
   );
 
   const { user, signOut, refreshUser } = useAuth();
+  const runAction = useAction();
   const isAdmin = user?.role === 'admin';
+
+  const { groups: workerGroupsList, groupByUser, taskCountByGroup } = useWorkerGroups();
+  const myGroupId = user?.id ? groupByUser[user.id] : null;
+  const myGroup = myGroupId ? workerGroupsList.find((g) => g.id === myGroupId) : null;
+  const myGroupTasksCount = myGroupId ? (taskCountByGroup[myGroupId] || 0) : 0;
 
   // Edit Name
   const [editingName, setEditingName] = useState(false);
@@ -78,32 +87,41 @@ export default function ProfileScreen({ navigation }) {
     }
   };
 
-  const handleSaveName = async () => {
+  const handleSaveName = () => {
     if (!fullName.trim() || fullName.trim() === user?.full_name) {
       setEditingName(false);
       return;
     }
 
-    try {
-      setSavingName(true);
-      if (isConfigured && supabase) {
-        const { error } = await supabase
-          .from('profiles')
-          .update({ full_name: fullName.trim() })
-          .eq('id', user.id);
+    runAction({
+      confirm: {
+        title: 'Update Display Name?',
+        message: `Change profile name to "${fullName.trim()}"?`,
+        confirmText: 'Save Name',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'person-outline',
+      },
+      loading: 'Saving profile name...',
+      action: async () => {
+        if (isConfigured && supabase) {
+          const { error } = await supabase
+            .from('profiles')
+            .update({ full_name: fullName.trim() })
+            .eq('id', user.id);
 
-        if (error) throw error;
-        await refreshUser();
-      }
-      setEditingName(false);
-    } catch (err) {
-      Alert.alert('Error', err.message || 'Could not update profile name.');
-    } finally {
-      setSavingName(false);
-    }
+          if (error) throw error;
+          await refreshUser();
+        }
+      },
+      success: 'Profile name updated successfully',
+      onSuccess: () => {
+        setEditingName(false);
+      },
+    });
   };
 
-  const handleUpdatePassword = async () => {
+  const handleUpdatePassword = () => {
     setPasswordNotice('');
     if (newPassword.length < 8) {
       setPasswordNotice('Password must be at least 8 characters.');
@@ -114,34 +132,47 @@ export default function ProfileScreen({ navigation }) {
       return;
     }
 
-    try {
-      setSavingPassword(true);
-      if (isConfigured && supabase) {
-        const { error } = await supabase.auth.updateUser({ password: newPassword });
-        if (error) throw error;
-      }
-      setShowPasswordModal(false);
-      setNewPassword('');
-      setConfirmPassword('');
-      Alert.alert('Success', 'Password updated successfully!');
-    } catch (err) {
-      setPasswordNotice(err.message || 'Failed to update password.');
-    } finally {
-      setSavingPassword(false);
-    }
+    runAction({
+      confirm: {
+        title: 'Change Password?',
+        message: 'Are you sure you want to update your login password?',
+        confirmText: 'Update Password',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'key-outline',
+      },
+      loading: 'Updating password...',
+      action: async () => {
+        if (isConfigured && supabase) {
+          const { error } = await supabase.auth.updateUser({ password: newPassword });
+          if (error) throw error;
+        }
+      },
+      success: 'Password updated successfully',
+      onSuccess: () => {
+        setShowPasswordModal(false);
+        setNewPassword('');
+        setConfirmPassword('');
+      },
+    });
   };
 
   const handleConfirmSignOut = () => {
-    if (Platform.OS === 'web') {
-      if (window.confirm('Are you sure you want to sign out?')) {
-        signOut();
-      }
-    } else {
-      Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Sign Out', style: 'destructive', onPress: signOut },
-      ]);
-    }
+    runAction({
+      confirm: {
+        title: 'Sign Out?',
+        message: 'Are you sure you want to sign out of your account?',
+        confirmText: 'Sign Out',
+        cancelText: 'Stay signed in',
+        tone: 'danger',
+        icon: 'log-out-outline',
+      },
+      loading: 'Signing out...',
+      action: async () => {
+        await signOut();
+      },
+      success: 'Signed out successfully',
+    });
   };
 
   const getInitials = (name) => {
@@ -221,6 +252,53 @@ export default function ProfileScreen({ navigation }) {
             <Text style={styles.roleText}>{isAdmin ? 'ADMINISTRATOR' : 'FIELD WORKER'}</Text>
           </View>
         </View>
+
+        {/* Worker Group Information */}
+        {!isAdmin && (
+          <View style={styles.sectionCard}>
+            <Text style={styles.sectionTitle}>Worker Group & Shift</Text>
+            {myGroup ? (
+              <View style={{ gap: 8 }}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                  <WorkerGroupBadge group={myGroup} />
+                  <Text style={styles.groupTasksCountBadge}>
+                    {myGroupTasksCount} {myGroupTasksCount === 1 ? 'task' : 'tasks'} assigned
+                  </Text>
+                </View>
+
+                {myGroup.description && (
+                  <Text style={styles.groupDescText}>{myGroup.description}</Text>
+                )}
+
+                {myGroup.shift_start && myGroup.shift_end && (
+                  <View style={styles.groupMetaRow}>
+                    <Ionicons name="time-outline" size={16} color={colors.primary} />
+                    <Text style={styles.groupMetaText}>
+                      Shift: {myGroup.shift_label ? `${myGroup.shift_label} • ` : ''}
+                      {myGroup.shift_start.slice(0, 5)} - {myGroup.shift_end.slice(0, 5)}
+                    </Text>
+                  </View>
+                )}
+
+                {myGroup.work_days && myGroup.work_days.length > 0 && (
+                  <View style={styles.groupMetaRow}>
+                    <Ionicons name="calendar-outline" size={16} color={colors.primary} />
+                    <Text style={styles.groupMetaText}>
+                      Work Days: {myGroup.work_days.map((d) => ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d-1]).join(', ')}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <View style={styles.noGroupProfileBox}>
+                <Ionicons name="people-outline" size={24} color={colors.textMuted} />
+                <Text style={styles.noGroupProfileText}>
+                  You are not currently assigned to a worker group. Contact your administrator.
+                </Text>
+              </View>
+            )}
+          </View>
+        )}
 
         {/* Assigned System / Station */}
         {!isAdmin && (
@@ -456,6 +534,37 @@ const styles = StyleSheet.create({
     backgroundColor: '#E2E8F0',
     padding: 8,
     borderRadius: 8,
+  },
+  groupTasksCountBadge: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primaryDark,
+  },
+  groupDescText: {
+    fontSize: 13,
+    color: colors.textSecondary,
+  },
+  groupMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  groupMetaText: {
+    fontSize: 12,
+    color: colors.dark,
+    fontWeight: '600',
+  },
+  noGroupProfileBox: {
+    padding: 14,
+    alignItems: 'center',
+    backgroundColor: '#F8FAFC',
+    borderRadius: 8,
+    gap: 4,
+  },
+  noGroupProfileText: {
+    fontSize: 12,
+    color: colors.textMuted,
+    textAlign: 'center',
   },
   sectionCard: {
     backgroundColor: colors.white,

@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform, AppState } from 'react-native';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   getCurrentUser,
   signIn as apiSignIn,
@@ -26,6 +27,7 @@ const AuthContext = createContext({
 });
 
 export function AuthProvider({ children }) {
+  const queryClient = useQueryClient();
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
   const [isAccountDisabled, setIsAccountDisabled] = useState(false);
@@ -94,8 +96,9 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     if (!user || user.role === 'admin' || !isConfigured || !supabase?.channel) return;
 
+    const channelId = `profile_status_${user.id}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
-      .channel(`profile_status_${user.id}`)
+      .channel(channelId)
       .on(
         'postgres_changes',
         {
@@ -156,6 +159,7 @@ export function AuthProvider({ children }) {
   const signIn = useCallback(async (email, password) => {
     try {
       const loggedUser = await apiSignIn(email, password);
+      queryClient.clear();
       setUser(loggedUser);
       setIsAccountDisabled(false);
       logActivity('auth.login', 'auth.users', loggedUser.id, { email: loggedUser.email });
@@ -166,11 +170,12 @@ export function AuthProvider({ children }) {
       }
       throw err;
     }
-  }, []);
+  }, [queryClient]);
 
   const signInWithRoleCheck = useCallback(async (email, password, expectedRole) => {
     try {
       const loggedUser = await apiSignInWithRoleCheck(email, password, expectedRole);
+      queryClient.clear();
       setUser(loggedUser);
       setIsAccountDisabled(false);
       logActivity('auth.login', 'auth.users', loggedUser.id, { email: loggedUser.email, role: loggedUser.role });
@@ -181,25 +186,27 @@ export function AuthProvider({ children }) {
       }
       throw err;
     }
-  }, []);
+  }, [queryClient]);
 
   const signUp = useCallback(async (email, password, fullName) => {
     const result = await apiSignUp(email, password, fullName);
     if (result && !result.requiresEmailConfirmation) {
+      queryClient.clear();
       setUser(result);
       setIsAccountDisabled(false);
       logActivity('auth.signup', 'auth.users', result.id, { email: result.email });
     }
     return result;
-  }, []);
+  }, [queryClient]);
 
   const signOut = useCallback(async () => {
     if (user) {
       logActivity('auth.logout', 'auth.users', user.id, { email: user.email });
     }
     await apiSignOut();
+    queryClient.clear();
     setUser(null);
-  }, [user]);
+  }, [user, queryClient]);
 
   const refreshUser = useCallback(async () => {
     await loadUser();

@@ -6,7 +6,9 @@
     "start": "expo start",
     "android": "expo start --android",
     "ios": "expo start --ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "lint:imports": "eslint src",
+    "lint:a11y": "node scripts/check-a11y-roles.js"
   },
   "dependencies": {
     "@expo/metro-runtime": "~58.0.17",
@@ -33,7 +35,10 @@
     "react-native-web": "^0.21.4"
   },
   "devDependencies": {
-    "@babel/core": "^7.25.2"
+    "@babel/core": "^7.25.2",
+    "eslint": "^9.39.5",
+    "eslint-plugin-import": "^2.32.0",
+    "eslint-plugin-react": "^7.37.5"
   },
   "private": true
 }

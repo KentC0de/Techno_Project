@@ -1,4 +1,4 @@
-﻿import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { supabase, isConfigured } from '../lib/supabase';
 
 const AppSettingsContext = createContext(null);
@@ -64,8 +64,9 @@ export function AppSettingsProvider({ children }) {
   useEffect(() => {
     if (!isConfigured || !supabase?.channel) return;
 
+    const channelId = `app_settings_rt_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const channel = supabase
-      .channel('app_settings_realtime')
+      .channel(channelId)
       .on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'app_settings' },

@@ -40,6 +40,7 @@ import { useBreakpoint } from '../../hooks/useBreakpoint';
 import FrequencyBadge from '../../components/FrequencyBadge';
 import StatusBadge from '../../components/StatusBadge';
 import ExportScheduleModal from '../../components/ExportScheduleModal';
+import TaskFormModal from '../../components/TaskFormModal';
 import WorkerGroupBadge from '../../components/WorkerGroupBadge';
 import WorkerGroupSelect from '../../components/WorkerGroupSelect';
 import { useWorkerGroups } from '../../hooks/useWorkerGroups';
@@ -54,7 +55,7 @@ function getInitials(name) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-export default function ScheduleCalendarScreen({ navigation }) {
+export default function ScheduleCalendarScreen({ navigation, route }) {
   const { user } = useAuth();
   const { selectedSystem, setSelectedSystem } = useSystemFilter();
   const queryClient = useQueryClient();
@@ -63,6 +64,17 @@ export default function ScheduleCalendarScreen({ navigation }) {
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
   const [selectedDayStr, setSelectedDayStr] = useState(formatDate(new Date()));
   const [exportModalVisible, setExportModalVisible] = useState(false);
+  const [addTaskModalVisible, setAddTaskModalVisible] = useState(false);
+
+  // Handle openAddTask param from navigation redirects
+  useEffect(() => {
+    if (route?.params?.openAddTask) {
+      setAddTaskModalVisible(true);
+      if (navigation?.setParams) {
+        navigation.setParams({ openAddTask: undefined });
+      }
+    }
+  }, [route?.params?.openAddTask, navigation]);
 
   // Calculate range depending on view mode
   const { rangeStart, rangeEnd } = React.useMemo(() => {
@@ -283,6 +295,18 @@ export default function ScheduleCalendarScreen({ navigation }) {
     });
   };
 
+  // Filtered tasks across the entire calendar based on system filter and group filter
+  const filteredTasks = React.useMemo(() => {
+    if (groupFilter === 'ALL') return tasks;
+    return tasks.filter((t) => {
+      const gId = t.rule?.worker_group_id || t.worker_group_id;
+      if (groupFilter === 'UNASSIGNED') {
+        return !gId;
+      }
+      return gId === groupFilter;
+    });
+  }, [tasks, groupFilter]);
+
   // Build Month Grid
   const renderMonthGrid = () => {
     const mRange = getMonthRange(currentDateStr);
@@ -290,9 +314,9 @@ export default function ScheduleCalendarScreen({ navigation }) {
     const firstWeekday = getIsoWeekday(d); // 1=Mon ... 7=Sun
     const totalDays = daysInMonth(mRange.year, mRange.month);
 
-    // Map tasks by day
+    // Map tasks by day using filteredTasks
     const tasksByDay = new Map();
-    for (const t of tasks) {
+    for (const t of filteredTasks) {
       if (!tasksByDay.has(t.due_date)) tasksByDay.set(t.due_date, []);
       tasksByDay.get(t.due_date).push(t);
     }
@@ -307,17 +331,12 @@ export default function ScheduleCalendarScreen({ navigation }) {
     for (let dayNum = 1; dayNum <= totalDays; dayNum++) {
       const dateStr = `${mRange.year}-${String(mRange.month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
       const dayTasks = tasksByDay.get(dateStr) || [];
-      const freqCounts = dayTasks.reduce((acc, t) => {
-        acc[t.frequency] = (acc[t.frequency] || 0) + 1;
-        return acc;
-      }, {});
 
       cells.push({
         isBlank: false,
         dateStr,
         dayNum,
         dayTasks,
-        freqCounts,
         isToday: dateStr === formatDate(new Date()),
         isSelected: dateStr === selectedDayStr,
         key: dateStr,
@@ -341,6 +360,8 @@ export default function ScheduleCalendarScreen({ navigation }) {
             if (cell.isBlank) {
               return <View key={cell.key} style={styles.blankCell} />;
             }
+            const taskCount = cell.dayTasks.length;
+            const countLabel = `${taskCount} ${taskCount === 1 ? 'task' : 'tasks'}`;
             return (
               <TouchableOpacity
                 key={cell.key}
@@ -360,20 +381,19 @@ export default function ScheduleCalendarScreen({ navigation }) {
                   >
                     {cell.dayNum}
                   </Text>
-                  {cell.dayTasks.length > 0 && (
-                    <Text style={styles.dayCellCount}>
-                      {cell.dayTasks.length}
-                    </Text>
-                  )}
                 </View>
 
-                {/* Frequency color badges in cell */}
-                <View style={styles.cellBadgeRow}>
-                  {Object.entries(cell.freqCounts).map(([freq, count]) => (
-                    <View key={freq} style={styles.microBadge}>
-                      <FrequencyBadge freq={freq} size="small" />
-                    </View>
-                  ))}
+                {/* Only task count line */}
+                <View style={styles.dayCellBody}>
+                  <Text
+                    style={[
+                      styles.dayCellCountText,
+                      taskCount === 0 && styles.dayCellCountMuted,
+                      cell.isSelected && styles.dayCellCountSelected,
+                    ]}
+                  >
+                    {countLabel}
+                  </Text>
                 </View>
               </TouchableOpacity>
             );
@@ -387,7 +407,7 @@ export default function ScheduleCalendarScreen({ navigation }) {
   const renderWeekView = () => {
     const wInfo = getWorkWeek(currentDateStr);
     const tasksByDay = new Map();
-    for (const t of tasks) {
+    for (const t of filteredTasks) {
       if (!tasksByDay.has(t.due_date)) tasksByDay.set(t.due_date, []);
       tasksByDay.get(t.due_date).push(t);
     }
@@ -398,6 +418,8 @@ export default function ScheduleCalendarScreen({ navigation }) {
           {wInfo.days.map((day) => {
             const dayTasks = tasksByDay.get(day.date) || [];
             const isSelected = day.date === selectedDayStr;
+            const taskCount = dayTasks.length;
+            const countLabel = `${taskCount} ${taskCount === 1 ? 'task' : 'tasks'}`;
             return (
               <TouchableOpacity
                 key={day.date}
@@ -433,20 +455,15 @@ export default function ScheduleCalendarScreen({ navigation }) {
                 </View>
 
                 <View style={styles.weekColBody}>
-                  <Text style={styles.weekTaskCount}>
-                    {dayTasks.length} {dayTasks.length === 1 ? 'task' : 'tasks'}
+                  <Text
+                    style={[
+                      styles.weekTaskCountText,
+                      taskCount === 0 && styles.weekTaskCountMuted,
+                      isSelected && styles.weekTaskCountSelected,
+                    ]}
+                  >
+                    {countLabel}
                   </Text>
-
-                  <View style={styles.colBadges}>
-                    {dayTasks.slice(0, 4).map((t) => (
-                      <View key={t.id} style={{ marginBottom: 4 }}>
-                        <FrequencyBadge freq={t.frequency} size="small" />
-                      </View>
-                    ))}
-                    {dayTasks.length > 4 && (
-                      <Text style={styles.moreCount}>+{dayTasks.length - 4} more</Text>
-                    )}
-                  </View>
                 </View>
               </TouchableOpacity>
             );
@@ -456,20 +473,8 @@ export default function ScheduleCalendarScreen({ navigation }) {
     );
   };
 
-  // Tasks for the selected day, optionally filtered by assigned group
-  const selectedDayTasks = tasks.filter((t) => {
-    if (t.due_date !== selectedDayStr) return false;
-
-    if (groupFilter === 'ALL') return true;
-
-    const gId = t.rule?.worker_group_id || t.worker_group_id;
-
-    if (groupFilter === 'UNASSIGNED') {
-      return !gId;
-    }
-
-    return gId === groupFilter;
-  });
+  // Tasks for the selected day, using filteredTasks
+  const selectedDayTasks = filteredTasks.filter((t) => t.due_date === selectedDayStr);
   const weekNum = getWorkWeekNumber(currentDateStr);
   const monthInfo = getMonthRange(currentDateStr);
 
@@ -493,10 +498,11 @@ export default function ScheduleCalendarScreen({ navigation }) {
             )}
             <TouchableOpacity
               style={styles.newRuleBtn}
-              onPress={() => navigation.navigate('SetSchedule')}
+              onPress={() => setAddTaskModalVisible(true)}
+              activeOpacity={0.8}
             >
               <Ionicons name="add" size={18} color={colors.white} />
-              <Text style={styles.newRuleText}>Add Rule</Text>
+              <Text style={styles.newRuleText}>Add Task</Text>
             </TouchableOpacity>
           </View>
         }
@@ -852,6 +858,19 @@ export default function ScheduleCalendarScreen({ navigation }) {
           onClose={() => setExportModalVisible(false)}
           initialPeriodType={viewMode}
         />
+
+        {/* Add Task Modal */}
+        <TaskFormModal
+          visible={addTaskModalVisible}
+          onClose={() => setAddTaskModalVisible(false)}
+          initialStartDate={selectedDayStr || currentDateStr}
+          onCreated={({ startDate }) => {
+            if (startDate) {
+              setSelectedDayStr(startDate);
+            }
+            refetchRules();
+          }}
+        />
       </PageContainer>
     </View>
   );
@@ -1061,7 +1080,7 @@ const styles = StyleSheet.create({
   },
   dayCellHeader: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-start',
     alignItems: 'center',
     marginBottom: 4,
   },
@@ -1073,22 +1092,24 @@ const styles = StyleSheet.create({
   dayCellNumSelected: {
     color: colors.primaryDark,
   },
-  dayCellCount: {
-    fontSize: 10,
+  dayCellBody: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  dayCellCountText: {
+    fontSize: 11,
     fontWeight: '700',
+    color: colors.dark,
+    textAlign: 'center',
+  },
+  dayCellCountMuted: {
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  dayCellCountSelected: {
     color: colors.primaryDark,
-    backgroundColor: colors.primaryVeryLight,
-    borderRadius: 4,
-    paddingHorizontal: 3,
-  },
-  cellBadgeRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 2,
-  },
-  microBadge: {
-    marginRight: 2,
-    marginBottom: 2,
+    fontWeight: '800',
   },
   weekViewContainer: {
     marginBottom: 16,
@@ -1141,24 +1162,24 @@ const styles = StyleSheet.create({
     color: colors.white,
   },
   weekColBody: {
-    padding: 8,
+    padding: 12,
     alignItems: 'center',
-    minHeight: 80,
+    justifyContent: 'center',
+    minHeight: 64,
   },
-  weekTaskCount: {
-    fontSize: 11,
+  weekTaskCountText: {
+    fontSize: 14,
     fontWeight: '700',
-    color: colors.textSecondary,
-    marginBottom: 6,
+    color: colors.dark,
+    textAlign: 'center',
   },
-  colBadges: {
-    alignItems: 'center',
-  },
-  moreCount: {
-    fontSize: 10,
+  weekTaskCountMuted: {
     color: colors.textMuted,
     fontWeight: '600',
-    marginTop: 2,
+  },
+  weekTaskCountSelected: {
+    color: colors.primaryDark,
+    fontWeight: '800',
   },
   dayTasksSection: {
     marginTop: 8,

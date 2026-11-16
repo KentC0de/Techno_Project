@@ -937,7 +937,7 @@ export default function AssignWorkersScreen({ navigation }) {
                       <View style={styles.emptyMembersBox}>
                         <Ionicons name="calendar-outline" size={24} color={colors.textMuted} />
                         <Text style={styles.emptyMembersText}>
-                          No tasks assigned to this group yet. Select this group when setting schedules in Set Schedule.
+                          No tasks assigned to this group yet. Select this group when clicking "Add Task" in the Schedule Calendar.
                         </Text>
                       </View>
                     ) : (

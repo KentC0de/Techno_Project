@@ -139,11 +139,6 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
       badgeColor: colors.primary,
     },
     {
-      key: 'SetSchedule',
-      label: 'Set Schedule',
-      icon: 'create-outline',
-    },
-    {
       key: 'AssignWorkers',
       label: 'Assign Workers',
       icon: 'people-circle-outline',

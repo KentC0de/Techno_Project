@@ -7,12 +7,8 @@ let channelInstanceCounter = 0;
 
 /**
  * useWorkerGroupsRealtime:
- * One dedicated hook that subscribes to realtime changes on schedule_rules, task_logs, worker_groups & worker_group_members.
- * - Created inside useEffect with a unique channel name per mount.
- * - Attaches listeners BEFORE calling .subscribe().
- * - Debounces (500ms) query invalidations.
- * - Safely removes the channel on cleanup.
- * - If workerUserId is passed, filters worker_group_members and triggers toast notices.
+ * Dedicated hook that subscribes to realtime changes on schedule_rules, worker_groups & worker_group_members.
+ * (Note: task_logs realtime is handled cleanly by useTaskLogsRealtime, and notifications by NotificationsProvider)
  */
 export function useWorkerGroupsRealtime({ workerUserId = null } = {}) {
   const queryClient = useQueryClient();
@@ -37,7 +33,6 @@ export function useWorkerGroupsRealtime({ workerUserId = null } = {}) {
         queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
         queryClient.invalidateQueries({ queryKey: ['schedule_rules_all'] });
         queryClient.invalidateQueries({ queryKey: ['calendar_tasks'] });
-        queryClient.invalidateQueries({ queryKey: ['task_logs'] });
       }, 500);
     };
 
@@ -45,32 +40,16 @@ export function useWorkerGroupsRealtime({ workerUserId = null } = {}) {
     channel.on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'schedule_rules' },
-      (payload) => {
+      () => {
         try {
           triggerInvalidation();
-          if (payload.eventType === 'INSERT') {
-            toast?.info('New task for your group');
-          }
         } catch (err) {
           if (__DEV__) console.log('[Realtime schedule_rules error]', err);
         }
       }
     );
 
-    // 2. Listen to task_logs changes
-    channel.on(
-      'postgres_changes',
-      { event: '*', schema: 'public', table: 'task_logs' },
-      () => {
-        try {
-          triggerInvalidation();
-        } catch (err) {
-          if (__DEV__) console.log('[Realtime task_logs error]', err);
-        }
-      }
-    );
-
-    // 3. Listen to worker_groups changes
+    // 2. Listen to worker_groups changes
     channel.on(
       'postgres_changes',
       { event: '*', schema: 'public', table: 'worker_groups' },
@@ -83,7 +62,7 @@ export function useWorkerGroupsRealtime({ workerUserId = null } = {}) {
       }
     );
 
-    // 4. Listen to worker_group_members changes
+    // 3. Listen to worker_group_members changes
     const memberFilter = workerUserId ? `user_id=eq.${workerUserId}` : undefined;
     channel.on(
       'postgres_changes',
@@ -112,7 +91,7 @@ export function useWorkerGroupsRealtime({ workerUserId = null } = {}) {
       }
     );
 
-    // 5. Subscribe AFTER listeners are registered
+    // 4. Subscribe AFTER listeners are registered
     channel.subscribe();
 
     return () => {
@@ -124,3 +103,4 @@ export function useWorkerGroupsRealtime({ workerUserId = null } = {}) {
   }, [queryClient, workerUserId, toast]);
 }
 
+export default useWorkerGroupsRealtime;

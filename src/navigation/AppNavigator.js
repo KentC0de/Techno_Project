@@ -41,6 +41,7 @@ import WebSidebar from '../components/WebSidebar';
 import LoadingSkeleton from '../components/LoadingSkeleton';
 import { PageErrorBoundary } from '../components/GlobalErrorBoundary';
 import { useWorkerGroupsRealtime } from '../hooks/useWorkerGroupsRealtime';
+import { useTaskLogsRealtime } from '../hooks/useTaskLogsRealtime';
 import { colors, layout } from '../theme';
 
 const Stack = createNativeStackNavigator();
@@ -208,6 +209,7 @@ function AdminTabNavigator() {
 function WorkerTabNavigator() {
   const { user } = useAuth();
   useWorkerGroupsRealtime({ workerUserId: user?.id });
+  useTaskLogsRealtime({ filterUserId: user?.id });
   const insets = useSafeAreaInsets();
   const bottomInset = insets?.bottom || 0;
 
@@ -286,6 +288,7 @@ const SafeWorkerToday      = withPageBoundary(TodayScreen,            'Worker Vi
 // --- ADMIN WEB CONTAINER (STACK NAVIGATOR + SIDEBAR) ---
 function ResponsiveAdminLayout({ navigation }) {
   useWorkerGroupsRealtime(); // Mount realtime once for admin area
+  useTaskLogsRealtime(); // Mount task_logs realtime once for admin layout
   const { width } = useWindowDimensions();
   const isDesktop = width >= 768;
   const isNarrow = width < 900;
@@ -304,15 +307,13 @@ function ResponsiveAdminLayout({ navigation }) {
   }, []);
 
   const handleNavigate = useCallback(
-    (target) => {
-      if (target !== activeTab) {
-        navigation.navigate('AdminRoot', { screen: target });
-      }
+    (target, params) => {
+      navigation.navigate('AdminRoot', { screen: target, params });
       if (isNarrow) {
         closeSidebar();
       }
     },
-    [activeTab, isNarrow, navigation, closeSidebar]
+    [isNarrow, navigation, closeSidebar]
   );
 
   if (!isDesktop) {
@@ -376,6 +377,7 @@ function ResponsiveAdminLayout({ navigation }) {
 function ResponsiveWorkerLayout({ navigation }) {
   const { user } = useAuth();
   useWorkerGroupsRealtime({ workerUserId: user?.id });
+  useTaskLogsRealtime({ filterUserId: user?.id });
   const { width } = useWindowDimensions();
   const isDesktop = width >= 768;
 

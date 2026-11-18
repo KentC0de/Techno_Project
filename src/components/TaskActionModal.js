@@ -267,6 +267,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     minWidth: 110,
   },
+  noticeBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0F9FF',
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 16,
+  },
+  noticeText: {
+    color: '#0284C7',
+    fontSize: 12,
+    fontWeight: '500',
+    flex: 1,
+  },
   cancelBtn: {
     backgroundColor: colors.background,
     borderWidth: 1,

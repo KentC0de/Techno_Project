@@ -24,8 +24,8 @@ import {
   getWorkWeek,
   getWorkWeekNumber,
   buildDueTasks,
-  computePerformance,
 } from '../../utils/schedule';
+import { computeTaskCounts } from '../../utils/taskStatus';
 import Header from '../../components/Header';
 import PageContainer from '../../components/PageContainer';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
@@ -74,26 +74,7 @@ export default function PerformanceScreen({ navigation }) {
     staleTime: 30 * 1000,
   });
 
-  // Realtime subscription for task_logs invalidation
-  useEffect(() => {
-    if (!isConfigured || !supabase?.channel) return;
-
-    const channelId = `perf_task_logs_${rangeStart}_${rangeEnd}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const channel = supabase
-      .channel(channelId)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'task_logs' },
-        () => {
-          queryClient.invalidateQueries({ queryKey: ['task_logs'] });
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [rangeStart, rangeEnd, queryClient]);
+  // Note: task_logs realtime invalidation handled globally by useTaskLogsRealtime in ResponsiveAdminLayout
 
   // Memoize task calculations, filtered by selectedSystem if not 'ALL'
   const tasks = useMemo(() => {
@@ -109,13 +90,13 @@ export default function PerformanceScreen({ navigation }) {
 
   const loading = loadingCats || loadingRules || loadingLogs;
 
-  // Overall performance
-  const overallPerf = computePerformance(tasks);
+  // Overall performance via shared computeTaskCounts (only done is completed)
+  const overallPerf = computeTaskCounts(tasks);
 
   // Group breakdown by System
   const systemBreakdowns = categories.map((cat) => {
     const catTasks = tasks.filter((t) => t.category?.id === cat.id);
-    const catPerf = computePerformance(catTasks);
+    const catPerf = computeTaskCounts(catTasks);
 
     // If PV Field Area (Cat B), also breakdown by Area 1, 2, 3
     let areaBreakdown = null;
@@ -124,7 +105,7 @@ export default function PerformanceScreen({ navigation }) {
         const areaTasks = catTasks.filter((t) => t.equipment?.area === areaName);
         return {
           areaName,
-          ...computePerformance(areaTasks),
+          ...computeTaskCounts(areaTasks),
         };
       });
     }
@@ -140,13 +121,13 @@ export default function PerformanceScreen({ navigation }) {
   const weekInfo = getWorkWeek(currentDateStr);
   const dailyBarData = weekInfo.days.map((day) => {
     const dayTasks = tasks.filter((t) => t.due_date === day.date);
-    const p = computePerformance(dayTasks);
+    const p = computeTaskCounts(dayTasks);
     return {
       label: day.shortLabel,
       date: day.date,
       rate: p.rate,
-      total: p.totalCount,
-      completed: p.completedCount,
+      total: p.total,
+      completed: p.done,
     };
   });
 
@@ -211,8 +192,20 @@ export default function PerformanceScreen({ navigation }) {
                 <Text style={styles.primaryMetricLabel}>% PERFORMANCE TO SCHEDULE</Text>
                 <Text style={styles.primaryMetricVal}>{overallPerf.rate}%</Text>
                 <Text style={styles.primaryMetricSub}>
-                  {overallPerf.completedCount} of {overallPerf.totalCount} tasks completed
+                  {overallPerf.done} of {overallPerf.total} tasks completed
                 </Text>
+              </View>
+
+              <View style={styles.metricCard}>
+                <Ionicons name="time" size={24} color="#0284C7" />
+                <Text style={styles.metricVal}>{overallPerf.waiting}</Text>
+                <Text style={styles.metricLabel}>Waiting for approval</Text>
+              </View>
+
+              <View style={styles.metricCard}>
+                <Ionicons name="close-circle" size={24} color="#DC2626" />
+                <Text style={styles.metricVal}>{overallPerf.rejected}</Text>
+                <Text style={styles.metricLabel}>Rejected</Text>
               </View>
 
               <View style={styles.metricCard}>
@@ -228,8 +221,8 @@ export default function PerformanceScreen({ navigation }) {
               </View>
 
               <View style={styles.metricCard}>
-                <Ionicons name="close-circle" size={24} color={colors.textSecondary} />
-                <Text style={styles.metricVal}>{overallPerf.skippedCount}</Text>
+                <Ionicons name="play-forward" size={24} color={colors.textSecondary} />
+                <Text style={styles.metricVal}>{overallPerf.skipped}</Text>
                 <Text style={styles.metricLabel}>Skipped Tasks</Text>
               </View>
             </View>

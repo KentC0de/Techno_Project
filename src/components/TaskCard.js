@@ -2,17 +2,28 @@ import React, { useState } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FrequencyBadge from './FrequencyBadge';
-import StatusBadge from './StatusBadge';
+import TaskStatusChip from './TaskStatusChip';
 import TaskActionModal from './TaskActionModal';
 import WorkerGroupBadge from './WorkerGroupBadge';
 import { colors } from '../theme';
+
+function formatSimpleTime(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  if (isNaN(d.getTime())) return '';
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  return `${hours}:${minutes}`;
+}
 
 export default function TaskCard({
   task,
   onUpdateStatus,
   onUndoStatus,
+  onCancelSubmission,
   canEdit = true,
   currentUserId = null,
+  profileMap = null,
 }) {
   const [modalVisible, setModalVisible] = useState(false);
   const [actionType, setActionType] = useState('done');
@@ -29,10 +40,6 @@ export default function TaskCard({
     log,
   } = task;
 
-  const isCompleted = status === 'done' || status === 'issue' || status === 'skipped';
-  // Allow undo if the log was done by this user or if admin
-  const canUndo = isCompleted && canEdit;
-
   const handleActionClick = (type) => {
     setActionType(type);
     setModalVisible(true);
@@ -42,12 +49,29 @@ export default function TaskCard({
     await onUpdateStatus(task, type, note);
   };
 
+  const isSubmitted = status === 'submitted';
+  const isDone = status === 'done';
+  const isRejected = status === 'rejected';
+  const isIssueOrSkipped = status === 'issue' || status === 'skipped';
+
+  // Submitter & Approver names
+  const submitterName = log?.done_by
+    ? (profileMap?.get ? profileMap.get(log.done_by) : profileMap?.[log.done_by]) || log.done_by_name || 'Worker'
+    : 'Worker';
+
+  const approverName = log?.approved_by || log?.reviewed_by
+    ? (profileMap?.get ? profileMap.get(log.approved_by || log.reviewed_by) : profileMap?.[log.approved_by || log.reviewed_by]) || log.approved_by_name || 'Admin'
+    : null;
+
+  const isMySubmission = isSubmitted && log?.done_by && currentUserId && log.done_by === currentUserId;
+
   return (
     <View
       style={[
         styles.card,
         isOverdue && styles.overdueCard,
-        status === 'done' && styles.doneCard,
+        isDone && styles.doneCard,
+        isRejected && styles.rejectedCard,
       ]}
     >
       {/* Top row: Frequency badge, Group & Area, and Status */}
@@ -66,7 +90,7 @@ export default function TaskCard({
           </View>
         </View>
 
-        <StatusBadge status={status} />
+        <TaskStatusChip status={status} />
       </View>
 
       {/* Main Content */}
@@ -78,11 +102,11 @@ export default function TaskCard({
       </View>
 
       {/* Worker Group Badge */}
-      <View style={{ marginTop: 6, marginBottom: 4 }}>
+      <View style={{ marginTop: 4, marginBottom: 8 }}>
         <WorkerGroupBadge group={task.rule?.worker_group || task.worker_group} />
       </View>
 
-      {/* Notes if any */}
+      {/* Schedule Notes if any */}
       {notes ? (
         <View style={styles.adminNoteBox}>
           <Ionicons
@@ -95,8 +119,43 @@ export default function TaskCard({
         </View>
       ) : null}
 
-      {/* If task has a logged note (e.g. issue or completion report) */}
-      {log?.notes ? (
+      {/* SUBMITTED STATE BANNER */}
+      {isSubmitted && (
+        <View style={styles.submittedBanner}>
+          <Ionicons name="time-outline" size={16} color="#0284C7" style={{ marginRight: 6 }} />
+          <Text style={styles.submittedBannerText}>
+            Waiting for admin approval • Submitted by {submitterName}
+            {log?.submitted_at || log?.done_at ? ` at ${formatSimpleTime(log.submitted_at || log.done_at)}` : ''}
+          </Text>
+        </View>
+      )}
+
+      {/* DONE / APPROVED STATE BANNER */}
+      {isDone && (
+        <View style={styles.doneBanner}>
+          <Ionicons name="checkmark-circle" size={16} color="#15803D" style={{ marginRight: 6 }} />
+          <Text style={styles.doneBannerText}>
+            Done by {submitterName} — {approverName ? `approved by ${approverName}` : 'Approved'}
+            {log?.approved_at || log?.reviewed_at ? ` at ${formatSimpleTime(log.approved_at || log.reviewed_at)}` : ''}
+          </Text>
+        </View>
+      )}
+
+      {/* REJECTED HIGHLIGHT BOX */}
+      {isRejected && (
+        <View style={styles.rejectedBox}>
+          <View style={styles.rejectedBoxHeader}>
+            <Ionicons name="alert-circle" size={16} color="#DC2626" style={{ marginRight: 6 }} />
+            <Text style={styles.rejectedBoxTitle}>Needs Redo — Rejected by Admin</Text>
+          </View>
+          <Text style={styles.rejectedReasonText}>
+            Reason: {log?.review_note || 'Please review and redo this maintenance task.'}
+          </Text>
+        </View>
+      )}
+
+      {/* Worker Log Note if any */}
+      {log?.notes && !isRejected ? (
         <View
           style={[
             styles.logNoteBox,
@@ -115,17 +174,17 @@ export default function TaskCard({
               status === 'issue' && styles.issueNoteText,
             ]}
           >
-            Worker Log: {log.notes}
+            Worker Note: {log.notes}
           </Text>
         </View>
       ) : null}
 
-      {/* Action Buttons for Worker / Admin */}
+      {/* Action Buttons */}
       {canEdit && (
         <View style={styles.actionsRow}>
-          {!isCompleted ? (
+          {/* Pending / Overdue state: Mark Done, Issue, Skip */}
+          {(status === 'pending' || status === 'overdue') && (
             <>
-              {/* Mark Done Button */}
               <TouchableOpacity
                 style={[styles.actionBtn, styles.doneBtn]}
                 onPress={() => handleActionClick('done')}
@@ -135,7 +194,6 @@ export default function TaskCard({
                 <Text style={styles.doneBtnText}>Mark Done</Text>
               </TouchableOpacity>
 
-              {/* Report Issue Button */}
               <TouchableOpacity
                 style={[styles.actionBtn, styles.issueBtn]}
                 onPress={() => handleActionClick('issue')}
@@ -145,7 +203,6 @@ export default function TaskCard({
                 <Text style={styles.issueBtnText}>Issue</Text>
               </TouchableOpacity>
 
-              {/* Skip Button */}
               <TouchableOpacity
                 style={[styles.actionBtn, styles.skipBtn]}
                 onPress={() => handleActionClick('skipped')}
@@ -155,17 +212,42 @@ export default function TaskCard({
                 <Text style={styles.skipBtnText}>Skip</Text>
               </TouchableOpacity>
             </>
-          ) : (
-            canUndo && (
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.undoBtn]}
-                onPress={() => onUndoStatus(task)}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="arrow-undo-outline" size={16} color={colors.dark} />
-                <Text style={styles.undoBtnText}>Undo / Reopen</Text>
-              </TouchableOpacity>
-            )
+          )}
+
+          {/* Submitted state: Cancel submission button (if current user submitted) */}
+          {isSubmitted && isMySubmission && (
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.cancelSubmissionBtn]}
+              onPress={() => onCancelSubmission && onCancelSubmission(task)}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="close-circle-outline" size={16} color="#DC2626" />
+              <Text style={styles.cancelSubmissionText}>Cancel submission</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Rejected state: Redo and resubmit button */}
+          {isRejected && (
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.redoBtn]}
+              onPress={() => handleActionClick('done')}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="refresh-outline" size={18} color={colors.white} />
+              <Text style={styles.redoBtnText}>Redo and resubmit</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Issue or Skipped: Undo / Reopen button */}
+          {isIssueOrSkipped && (
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.undoBtn]}
+              onPress={() => onUndoStatus(task)}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="arrow-undo-outline" size={16} color={colors.dark} />
+              <Text style={styles.undoBtnText}>Undo / Reopen</Text>
+            </TouchableOpacity>
           )}
         </View>
       )}
@@ -190,28 +272,6 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: 16,
     marginBottom: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  coWorkersBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#F0F9FF',
-    borderColor: '#BAE6FD',
-    borderWidth: 1,
-    borderRadius: 8,
-    paddingVertical: 5,
-    paddingHorizontal: 8,
-    marginTop: 8,
-    alignSelf: 'flex-start',
-  },
-  coWorkersText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.primaryDark,
   },
   overdueCard: {
     borderColor: '#FCA5A5',
@@ -219,6 +279,11 @@ const styles = StyleSheet.create({
   },
   doneCard: {
     borderColor: '#BAE6FD',
+    backgroundColor: '#F8FAFC',
+  },
+  rejectedCard: {
+    borderColor: '#FCA5A5',
+    backgroundColor: '#FFFBFB',
   },
   topRow: {
     flexDirection: 'row',
@@ -259,7 +324,7 @@ const styles = StyleSheet.create({
     color: colors.primaryDark,
   },
   mainContent: {
-    marginBottom: 10,
+    marginBottom: 6,
   },
   equipmentName: {
     fontSize: 16,
@@ -285,6 +350,63 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: colors.primaryDark,
     flex: 1,
+  },
+  submittedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0F9FF',
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  submittedBannerText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0284C7',
+    flex: 1,
+  },
+  doneBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#F0FDF4',
+    borderWidth: 1,
+    borderColor: '#BBF7D0',
+    borderRadius: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    marginBottom: 10,
+  },
+  doneBannerText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#15803D',
+    flex: 1,
+  },
+  rejectedBox: {
+    backgroundColor: '#FEF2F2',
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
+  },
+  rejectedBoxHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  rejectedBoxTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#DC2626',
+  },
+  rejectedReasonText: {
+    fontSize: 12,
+    color: '#991B1B',
+    lineHeight: 16,
   },
   logNoteBox: {
     flexDirection: 'row',
@@ -321,7 +443,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    minHeight: 48,
+    minHeight: 44,
     paddingHorizontal: 14,
     borderRadius: 10,
   },
@@ -335,6 +457,29 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 14,
     marginLeft: 6,
+  },
+  redoBtn: {
+    backgroundColor: '#0EA5E9',
+    flex: 1,
+    minWidth: 150,
+  },
+  redoBtnText: {
+    color: colors.white,
+    fontWeight: '700',
+    fontSize: 14,
+    marginLeft: 6,
+  },
+  cancelSubmissionBtn: {
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+    paddingHorizontal: 12,
+  },
+  cancelSubmissionText: {
+    color: '#DC2626',
+    fontWeight: '600',
+    fontSize: 12,
+    marginLeft: 4,
   },
   issueBtn: {
     backgroundColor: colors.white,
@@ -376,4 +521,3 @@ const styles = StyleSheet.create({
     marginLeft: 6,
   },
 });
-

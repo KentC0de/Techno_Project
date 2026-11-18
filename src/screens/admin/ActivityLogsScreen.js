@@ -145,10 +145,27 @@ export default function ActivityLogsScreen({ navigation }) {
     if (action === 'auth.login') return `${user} logged in`;
     if (action === 'auth.logout') return `${user} logged out`;
     if (action === 'auth.password_changed') return `${user} changed account password`;
-    if (action === 'task_logs.insert') {
-      const rec = item.details?.record || {};
-      const status = rec.status ? rec.status.toUpperCase() : 'COMPLETED';
-      return `${user} marked maintenance task as ${status}`;
+    if (action === 'task_logs.insert' || action === 'task_logs.update' || action === 'task_log.review') {
+      const rec = item.details?.record || item.details?.new || item.details || {};
+      const status = (rec.status || '').toLowerCase();
+      const reason = rec.review_note || rec.notes || item.details?.review_note || '';
+      if (status === 'submitted') {
+        return `${user} submitted maintenance task for approval`;
+      }
+      if (status === 'done') {
+        return `${user} approved maintenance task`;
+      }
+      if (status === 'rejected') {
+        return reason ? `${user} rejected maintenance task: ${reason}` : `${user} rejected maintenance task`;
+      }
+      if (status === 'issue') {
+        return reason ? `${user} reported an issue: ${reason}` : `${user} reported an issue`;
+      }
+      if (status === 'skipped') {
+        return reason ? `${user} skipped maintenance task: ${reason}` : `${user} skipped maintenance task`;
+      }
+      const upperStatus = rec.status ? rec.status.toUpperCase() : 'COMPLETED';
+      return `${user} marked maintenance task as ${upperStatus}`;
     }
     if (action === 'schedule_rules.insert') return `${user} created a new schedule rule`;
     if (action === 'schedule_rules.update') return `${user} updated a schedule rule`;

@@ -38,6 +38,7 @@ import {
 import Header from '../../components/Header';
 import TaskCard from '../../components/TaskCard';
 import ProgressBar from '../../components/ProgressBar';
+import Pagination from '../../components/Pagination';
 import EmptyState from '../../components/EmptyState';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
 import ErrorMessage from '../../components/ErrorMessage';
@@ -46,6 +47,9 @@ import { useWorkerGroups } from '../../hooks/useWorkerGroups';
 import { useWorkers } from '../../hooks/useWorkers';
 import { useAction } from '../../hooks/useAction';
 import { useToast } from '../../components/feedback';
+import { computeTaskCounts } from '../../utils/taskStatus';
+import WorkerNotificationsModal from '../../components/WorkerNotificationsModal';
+import { useNotificationsContext } from '../../context/NotificationsProvider';
 import { colors, layout } from '../../theme';
 
 export default function TodayScreen({ navigation, route }) {
@@ -81,6 +85,8 @@ export default function TodayScreen({ navigation, route }) {
 
   const [refreshing, setRefreshing] = useState(false);
   const [mutatingRuleId, setMutatingRuleId] = useState(null);
+  const [notifModalVisible, setNotifModalVisible] = useState(false);
+  const { unreadCount: workerUnreadNotifs } = useNotificationsContext();
 
   // Range window: past 30 days to next 14 days
   const today = new Date();
@@ -233,13 +239,20 @@ export default function TodayScreen({ navigation, route }) {
     setRefreshing(false);
   };
 
+  // Worker filter tabs state: 'all' | 'pending' | 'submitted' | 'done' | 'rejected'
+  const [workerStatusFilter, setWorkerStatusFilter] = useState('all');
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 10;
+
   // Mutation with optimistic updates & friendly concurrent notice
   const updateLogMutation = useMutation({
     mutationFn: async ({ task, status, note }) => {
+      // NEVER write 'done' directly from worker phone app!
+      const targetStatus = status === 'done' ? 'submitted' : status;
       return await upsertTaskLog({
         rule_id: task.rule_id,
         due_date: task.due_date,
-        status,
+        status: targetStatus,
         notes: note,
         done_by: user?.id || null,
       });
@@ -248,6 +261,8 @@ export default function TodayScreen({ navigation, route }) {
       setMutatingRuleId(task.rule_id);
       await queryClient.cancelQueries({ queryKey: ['task_logs'] });
       const previousLogs = queryClient.getQueryData(['task_logs', pastWindowStart, futureWindowEnd]);
+
+      const targetStatus = status === 'done' ? 'submitted' : status;
 
       queryClient.setQueryData(
         ['task_logs', pastWindowStart, futureWindowEnd],
@@ -261,10 +276,11 @@ export default function TodayScreen({ navigation, route }) {
               id: `opt-${Date.now()}`,
               rule_id: task.rule_id,
               due_date: task.due_date,
-              status,
+              status: targetStatus,
               notes: note,
               done_by: user?.id,
               done_at: new Date().toISOString(),
+              submitted_at: new Date().toISOString(),
             },
           ];
         }
@@ -279,12 +295,7 @@ export default function TodayScreen({ navigation, route }) {
           context.previousLogs
         );
       }
-      // Graceful concurrent notice
-      if (err?.code === '23505' || err?.message?.includes('duplicate key') || err?.message?.includes('already exists')) {
-        alert('This task was already completed by a co-worker.');
-      } else {
-        alert(err.message || 'Failed to update task.');
-      }
+      toast.error(err.message || 'Failed to update task.');
     },
     onSettled: () => {
       setMutatingRuleId(null);
@@ -295,33 +306,77 @@ export default function TodayScreen({ navigation, route }) {
   const handleUpdateStatus = (task, status, note) => {
     if (mutatingRuleId) return; // double-submit prevention
 
-    const statusLabel =
-      status === 'done' ? 'Mark Done' : status === 'issue' ? 'Report Issue' : 'Skip Task';
     const isDone = status === 'done';
+    const statusLabel = isDone
+      ? 'Submit for admin approval?'
+      : status === 'issue'
+      ? 'Report Issue'
+      : 'Skip Task';
 
     runAction({
       confirm: {
-        title: `${statusLabel}?`,
-        message: `${statusLabel} for "${task.equipment?.name || 'Equipment'}"?`,
+        title: isDone ? 'Submit for admin approval?' : `${statusLabel}?`,
+        message: isDone
+          ? 'Your admin will verify this task. It counts as done only after approval.'
+          : `${statusLabel} for "${task.equipment?.name || 'Equipment'}"?`,
         details: [
           `Date: ${task.due_date}`,
           `Area: ${task.equipment?.area || 'General Area'}`,
           note ? `Note: "${note}"` : null,
         ].filter(Boolean),
-        confirmText: statusLabel,
+        confirmText: isDone ? 'Submit for Approval' : statusLabel,
         cancelText: 'Cancel',
         tone: status === 'issue' ? 'danger' : 'default',
         icon: isDone
-          ? 'checkmark-circle-outline'
+          ? 'time-outline'
           : status === 'issue'
           ? 'alert-circle-outline'
           : 'play-forward-outline',
       },
-      loading: 'Updating task status...',
+      loading: isDone ? 'Submitting for admin approval...' : 'Updating task status...',
       action: async () => {
         return await updateLogMutation.mutateAsync({ task, status, note });
       },
-      success: `Task marked as ${status.toUpperCase()}`,
+      success: isDone
+        ? 'Submitted. Waiting for admin approval.'
+        : `Task marked as ${status.toUpperCase()}`,
+    });
+  };
+
+  const handleCancelSubmission = (task) => {
+    if (mutatingRuleId) return;
+
+    runAction({
+      confirm: {
+        title: 'Cancel Submission?',
+        message: `Cancel submission for "${task.equipment?.name || 'Equipment'}"? The task will return to pending.`,
+        confirmText: 'Cancel Submission',
+        cancelText: 'Keep Submission',
+        tone: 'danger',
+        icon: 'close-circle-outline',
+      },
+      loading: 'Cancelling submission...',
+      action: async () => {
+        if (isConfigured && supabase) {
+          const { error: delErr } = await supabase
+            .from('task_logs')
+            .delete()
+            .eq('rule_id', task.rule_id)
+            .eq('due_date', task.due_date)
+            .eq('status', 'submitted');
+
+          if (delErr) {
+            if (delErr.message?.includes('already approved')) {
+              throw new Error('This task was already approved by the admin.');
+            }
+            throw delErr;
+          }
+        } else {
+          await undoTaskLog(task.rule_id, task.due_date, 'submitted');
+        }
+        queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+      },
+      success: 'Submission cancelled. Task is now pending.',
     });
   };
 
@@ -378,13 +433,48 @@ export default function TodayScreen({ navigation, route }) {
   // Selected date tasks
   const selectedDateTasks = allTasks.filter((t) => t.due_date === currentDateStr);
 
-  // Group selected date tasks by group name
-  const groupedTasks = selectedDateTasks.reduce((acc, t) => {
-    const groupName = t.group?.name || 'General Tasks';
-    if (!acc[groupName]) acc[groupName] = [];
-    acc[groupName].push(t);
-    return acc;
-  }, {});
+  const taskCounts = useMemo(() => {
+    return computeTaskCounts(selectedDateTasks);
+  }, [selectedDateTasks]);
+
+  // Status Filtered Tasks
+  const statusFilteredTasks = useMemo(() => {
+    if (workerStatusFilter === 'all') return selectedDateTasks;
+    if (workerStatusFilter === 'pending') {
+      return selectedDateTasks.filter((t) => t.status === 'pending');
+    }
+    if (workerStatusFilter === 'submitted') {
+      return selectedDateTasks.filter((t) => t.status === 'submitted');
+    }
+    if (workerStatusFilter === 'done') {
+      return selectedDateTasks.filter((t) => t.status === 'done');
+    }
+    if (workerStatusFilter === 'rejected') {
+      return selectedDateTasks.filter((t) => t.status === 'rejected');
+    }
+    return selectedDateTasks;
+  }, [selectedDateTasks, workerStatusFilter]);
+
+  // Reset page when filter changes
+  useEffect(() => {
+    setPage(1);
+  }, [workerStatusFilter, currentDateStr]);
+
+  // Paginated tasks
+  const paginatedTasks = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return statusFilteredTasks.slice(start, start + PAGE_SIZE);
+  }, [statusFilteredTasks, page]);
+
+  // Group paginated tasks by group name
+  const groupedTasks = useMemo(() => {
+    return paginatedTasks.reduce((acc, t) => {
+      const groupName = t.group?.name || 'General Tasks';
+      if (!acc[groupName]) acc[groupName] = [];
+      acc[groupName].push(t);
+      return acc;
+    }, {});
+  }, [paginatedTasks]);
 
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
@@ -454,20 +544,41 @@ export default function TodayScreen({ navigation, route }) {
           </View>
         </View>
 
-        {/* Supabase Status Dot Only (Tapping displays toast/tooltip status) */}
-        <TouchableOpacity
-          style={styles.dotTouch}
-          onPress={handleStatusPress}
-          activeOpacity={0.7}
-          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        >
-          <View
-            style={[
-              styles.statusDotOnly,
-              { backgroundColor: getStatusColor() },
-            ]}
-          />
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          {/* Supabase Status Dot */}
+          <TouchableOpacity
+            style={styles.dotTouch}
+            onPress={handleStatusPress}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <View
+              style={[
+                styles.statusDotOnly,
+                { backgroundColor: getStatusColor() },
+              ]}
+            />
+          </TouchableOpacity>
+
+          {/* Worker Notification Bell */}
+          <TouchableOpacity
+            style={styles.workerBellTouch}
+            onPress={() => setNotifModalVisible(true)}
+            activeOpacity={0.7}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityRole="button"
+            accessibilityLabel="Notifications"
+          >
+            <Ionicons name="notifications-outline" size={20} color={colors.white} />
+            {workerUnreadNotifs > 0 && (
+              <View style={styles.workerBellBadge}>
+                <Text style={styles.workerBellBadgeText}>
+                  {workerUnreadNotifs > 99 ? '99+' : workerUnreadNotifs}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView
@@ -476,7 +587,18 @@ export default function TodayScreen({ navigation, route }) {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={[colors.primary]} />
         }
       >
-        {/* Large Scrollable Heading inside the scrollable content */}
+        {/* Worker Notifications Modal */}
+      <WorkerNotificationsModal
+        visible={notifModalVisible}
+        onClose={() => setNotifModalVisible(false)}
+        onSelectNotification={(notif) => {
+          if (notif?.type === 'task_rejected') {
+            setWorkerStatusFilter('rejected');
+          }
+        }}
+      />
+
+      {/* Large Scrollable Heading inside the scrollable content */}
         <View style={styles.pageHeadingSection}>
           <Text style={styles.pageTitle} numberOfLines={1} ellipsizeMode="tail">
             Today's Tasks
@@ -623,12 +745,61 @@ export default function TodayScreen({ navigation, route }) {
           </View>
         )}
 
-        {/* Progress Bar */}
+        {/* Progress Bar: Counts ONLY approved tasks, plus waiting line */}
         <ProgressBar
-          completed={perf.completedCount}
-          total={perf.totalCount}
-          title={currentDateStr === todayStr ? 'Today\'s Progress' : `Progress for ${currentDateStr}`}
+          completed={taskCounts.done}
+          total={taskCounts.total}
+          waiting={taskCounts.waiting}
+          title={currentDateStr === todayStr ? "Today's Progress" : `Progress for ${currentDateStr}`}
         />
+
+        {/* Worker Status Filter Chips */}
+        <View style={styles.filterChipRow}>
+          <TouchableOpacity
+            style={[styles.filterChip, workerStatusFilter === 'all' && styles.filterChipActive]}
+            onPress={() => setWorkerStatusFilter('all')}
+          >
+            <Text style={[styles.filterChipText, workerStatusFilter === 'all' && styles.filterChipTextActive]}>
+              All ({selectedDateTasks.length})
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.filterChip, workerStatusFilter === 'pending' && styles.filterChipActive]}
+            onPress={() => setWorkerStatusFilter('pending')}
+          >
+            <Text style={[styles.filterChipText, workerStatusFilter === 'pending' && styles.filterChipTextActive]}>
+              Pending ({taskCounts.pending})
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.filterChip, workerStatusFilter === 'submitted' && styles.filterChipActive]}
+            onPress={() => setWorkerStatusFilter('submitted')}
+          >
+            <Text style={[styles.filterChipText, workerStatusFilter === 'submitted' && styles.filterChipTextActive]}>
+              Waiting ({taskCounts.waiting})
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.filterChip, workerStatusFilter === 'done' && styles.filterChipActive]}
+            onPress={() => setWorkerStatusFilter('done')}
+          >
+            <Text style={[styles.filterChipText, workerStatusFilter === 'done' && styles.filterChipTextActive]}>
+              Done ({taskCounts.done})
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.filterChip, workerStatusFilter === 'rejected' && styles.filterChipActive]}
+            onPress={() => setWorkerStatusFilter('rejected')}
+          >
+            <Text style={[styles.filterChipText, workerStatusFilter === 'rejected' && styles.filterChipTextActive]}>
+              Rejected ({taskCounts.rejected})
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         {/* Loading / Error states */}
         {loading && !refreshing ? (
@@ -717,27 +888,51 @@ export default function TodayScreen({ navigation, route }) {
                   onAction={() => navigation.navigate('ChooseWorkTab', { isChangingWork: true })}
                 />
               )
+            ) : statusFilteredTasks.length === 0 ? (
+              <EmptyState
+                title={`No ${workerStatusFilter} tasks`}
+                message={`There are no ${workerStatusFilter} tasks for ${currentDateStr}.`}
+                icon="filter-outline"
+                actionLabel="View all tasks"
+                onAction={() => setWorkerStatusFilter('all')}
+              />
             ) : (
-              Object.entries(groupedTasks).map(([groupName, tasksInGroup]) => (
-                <View key={groupName} style={styles.groupContainer}>
-                  <View style={styles.groupHeaderBar}>
-                    <Ionicons name="layers-outline" size={16} color={colors.primaryDark} />
-                    <Text style={styles.groupHeaderTitle}>{groupName}</Text>
-                    <Text style={styles.groupHeaderCount}>
-                      ({tasksInGroup.length})
-                    </Text>
+              <>
+                {Object.entries(groupedTasks).map(([groupName, tasksInGroup]) => (
+                  <View key={groupName} style={styles.groupContainer}>
+                    <View style={styles.groupHeaderBar}>
+                      <Ionicons name="layers-outline" size={16} color={colors.primaryDark} />
+                      <Text style={styles.groupHeaderTitle}>{groupName}</Text>
+                      <Text style={styles.groupHeaderCount}>
+                        ({tasksInGroup.length})
+                      </Text>
+                    </View>
+                    {tasksInGroup.map((task) => (
+                      <TaskCard
+                        key={task.id}
+                        task={task}
+                        onUpdateStatus={handleUpdateStatus}
+                        onUndoStatus={handleUndoStatus}
+                        onCancelSubmission={handleCancelSubmission}
+                        currentUserId={user?.id}
+                        profileMap={workerData?.allUsers ? new Map(workerData.allUsers.map((u) => [u.id, u.full_name])) : null}
+                      />
+                    ))}
                   </View>
-                  {tasksInGroup.map((task) => (
-                    <TaskCard
-                      key={task.id}
-                      task={task}
-                      onUpdateStatus={handleUpdateStatus}
-                      onUndoStatus={handleUndoStatus}
-                      currentUserId={user?.id}
+                ))}
+
+                {/* 10 per page pagination */}
+                {statusFilteredTasks.length > PAGE_SIZE && (
+                  <View style={{ marginTop: 8, marginBottom: 16 }}>
+                    <Pagination
+                      currentPage={page}
+                      totalItems={statusFilteredTasks.length}
+                      pageSize={PAGE_SIZE}
+                      onPageChange={setPage}
                     />
-                  ))}
-                </View>
-              ))
+                  </View>
+                )}
+              </>
             )}
           </>
         )}
@@ -1089,6 +1284,34 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: colors.primaryDark,
     marginLeft: 6,
+  },
+  filterChipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 16,
+    flexWrap: 'wrap',
+  },
+  filterChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 20,
+    backgroundColor: '#F4F4F5',
+    borderWidth: 1,
+    borderColor: '#E4E4E7',
+  },
+  filterChipActive: {
+    backgroundColor: '#E0F2FE',
+    borderColor: '#0EA5E9',
+  },
+  filterChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#52525B',
+  },
+  filterChipTextActive: {
+    color: '#0284C7',
+    fontWeight: '700',
   },
   diagContainer: {
     marginTop: 24,

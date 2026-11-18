@@ -2,7 +2,7 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { colors } from '../theme';
 
-export default function ProgressBar({ completed = 0, total = 0, title = 'Today\'s Progress' }) {
+export default function ProgressBar({ completed = 0, total = 0, waiting = 0, title = "Today's Progress" }) {
   const percentage = total > 0 ? Math.min(100, Math.round((completed / total) * 100)) : 0;
 
   return (
@@ -24,6 +24,11 @@ export default function ProgressBar({ completed = 0, total = 0, title = 'Today\'
           ]}
         />
       </View>
+      {waiting > 0 && (
+        <View style={styles.waitingRow}>
+          <Text style={styles.waitingText}>{waiting} waiting for approval</Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -66,5 +71,14 @@ const styles = StyleSheet.create({
     height: '100%',
     borderRadius: 5,
   },
+  waitingRow: {
+    marginTop: 8,
+  },
+  waitingText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#0284C7',
+  },
 });
+
 

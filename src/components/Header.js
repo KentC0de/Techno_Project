@@ -9,17 +9,21 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useNavigation } from '@react-navigation/native';
 import { useAuth } from '../context/AuthContext';
 import { useSidebar } from '../context/SidebarContext';
 import { useConnectionStatus } from '../context/ConnectionStatusContext';
+import NotificationBell from './NotificationBell';
 import { colors } from '../theme';
 
 export default function Header({
   title,
   subtitle,
   rightAction = null,
+  onNavigate = null,
 }) {
   const { user } = useAuth();
+  const navigation = useNavigation();
   const { toggleSidebar } = useSidebar();
   const { status: connStatus, lastCheckedTime } = useConnectionStatus();
   const { width } = useWindowDimensions();
@@ -38,6 +42,20 @@ export default function Header({
     if (connStatus === 'connected') return 'Supabase connected - Live';
     if (connStatus === 'checking') return 'Checking connection...';
     return 'Cannot reach Supabase';
+  };
+
+  const handleBellNavigate = (screen, params) => {
+    if (onNavigate) {
+      onNavigate(screen, params);
+    } else if (navigation) {
+      try {
+        navigation.navigate('AdminRoot', { screen, params });
+      } catch (_) {
+        try {
+          navigation.navigate(screen, params);
+        } catch (__) {}
+      }
+    }
   };
 
   return (
@@ -99,6 +117,11 @@ export default function Header({
               </View>
             )}
           </View>
+
+          {/* Global Notification Bell (Admins) */}
+          {isAdmin && (
+            <NotificationBell onNavigate={handleBellNavigate} />
+          )}
 
           {/* Action button (e.g., + Add Rule) */}
           {rightAction}

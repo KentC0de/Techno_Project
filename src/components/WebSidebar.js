@@ -16,6 +16,7 @@ import { useAuth } from '../context/AuthContext';
 import { useSidebar } from '../context/SidebarContext';
 import { useSystemFilter } from '../context/SystemFilterContext';
 import { useAction } from '../hooks/useAction';
+import { usePendingApprovals } from '../hooks/usePendingApprovals';
 import { fetchScheduleRules, fetchTaskLogs } from '../lib/dataService';
 import {
   formatDate,
@@ -23,6 +24,7 @@ import {
   buildDueTasks,
   computePerformance,
 } from '../utils/schedule';
+import { computeTaskCounts } from '../utils/taskStatus';
 import { colors } from '../theme';
 
 const ROUTE_LABELS = {
@@ -89,6 +91,8 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
     staleTime: 60 * 1000,
   });
 
+  const { count: pendingApprovalsCount } = usePendingApprovals({ enabled: isAdmin });
+
   // Today's due tasks & Overdue tasks count
   const { todayDueCount, overdueCount, weekPerformanceRate } = useMemo(() => {
     if (!rules || rules.length === 0) {
@@ -97,7 +101,7 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
 
     // Weekly tasks
     const weekTasks = buildDueTasks(rules, weekLogs, currentWeek.start, currentWeek.end);
-    const perf = computePerformance(weekTasks);
+    const perf = computeTaskCounts(weekTasks);
 
     // Today's tasks (due today and pending)
     const todayTasks = weekTasks.filter((t) => t.dueDate === todayStr);
@@ -105,7 +109,7 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
 
     return {
       todayDueCount: todayPending,
-      overdueCount: perf.overdueCount || 0,
+      overdueCount: perf.overdue || 0,
       weekPerformanceRate: perf.rate || 0,
     };
   }, [rules, weekLogs, currentWeek, todayStr]);
@@ -135,8 +139,9 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
       key: 'AdminCalendar',
       label: 'Schedule Calendar',
       icon: 'calendar-outline',
-      badge: todayDueCount > 0 ? todayDueCount : null,
-      badgeColor: colors.primary,
+      badge: pendingApprovalsCount > 0 ? (pendingApprovalsCount > 99 ? '99+' : pendingApprovalsCount) : null,
+      badgeColor: '#0EA5E9',
+      navigateParams: { tab: 'approval' },
     },
     {
       key: 'AssignWorkers',
@@ -347,7 +352,7 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
                   isActive && styles.navItemActive,
                   isCollapsed && styles.navItemCollapsed,
                 ]}
-                onPress={() => onNavigate(item.key)}
+                onPress={() => onNavigate(item.key, item.navigateParams)}
                 activeOpacity={0.7}
               >
                 <View style={styles.navItemIconWrapper}>

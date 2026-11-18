@@ -183,6 +183,7 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
     // Fast count of due and done
     let totalDue = 0;
     let totalDone = 0;
+    let totalWaiting = 0;
 
     const logMap = new Map();
     taskLogs.forEach((l) => logMap.set(`${l.rule_id}_${l.due_date}`, l));
@@ -226,6 +227,7 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
             totalDue++;
             const log = logMap.get(`${rule.id}_${curDateStr}`);
             if (log?.status === 'done') totalDone++;
+            else if (log?.status === 'submitted') totalWaiting++;
           }
         });
       }
@@ -237,6 +239,7 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
       rows: includedEquipment.length,
       due: totalDue,
       done: totalDone,
+      waiting: totalWaiting,
       rate: pct,
     };
   }, [
@@ -512,7 +515,7 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
             <View style={styles.summaryCallout}>
               <Ionicons name="stats-chart" size={18} color={colors.primary} />
               <Text style={styles.summaryText}>
-                {`${summary.weeks} work week${summary.weeks === 1 ? '' : 's'} • ${summary.rows} rows • ${summary.done} done / ${summary.due} due (${summary.rate}%)`}
+                {`${summary.weeks} work week${summary.weeks === 1 ? '' : 's'} • ${summary.rows} rows • ${summary.done} done (approved), ${summary.waiting} waiting for approval / ${summary.due} due (${summary.rate}%)`}
               </Text>
             </View>
           </ScrollView>

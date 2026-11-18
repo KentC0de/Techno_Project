@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -39,6 +39,8 @@ import Pagination from '../../components/Pagination';
 import { useBreakpoint } from '../../hooks/useBreakpoint';
 import FrequencyBadge from '../../components/FrequencyBadge';
 import StatusBadge from '../../components/StatusBadge';
+import TaskStatusChip from '../../components/TaskStatusChip';
+import TaskLogCard from '../../components/TaskLogCard';
 import ExportScheduleModal from '../../components/ExportScheduleModal';
 import TaskFormModal from '../../components/TaskFormModal';
 import WorkerGroupBadge from '../../components/WorkerGroupBadge';
@@ -46,7 +48,21 @@ import WorkerGroupSelect from '../../components/WorkerGroupSelect';
 import { useWorkerGroups } from '../../hooks/useWorkerGroups';
 import { useWorkers } from '../../hooks/useWorkers';
 import { useAction } from '../../hooks/useAction';
+import { usePendingApprovals } from '../../hooks/usePendingApprovals';
+import { useToast } from '../../components/feedback';
 import { colors, layout } from '../../theme';
+
+function formatSimpleDateTime(isoStr) {
+  if (!isoStr) return '';
+  const d = new Date(isoStr);
+  if (isNaN(d.getTime())) return isoStr;
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const h = String(d.getHours()).padStart(2, '0');
+  const min = String(d.getMinutes()).padStart(2, '0');
+  return `${y}-${m}-${day} ${h}:${min}`;
+}
 
 function getInitials(name) {
   if (!name) return '??';
@@ -60,11 +76,34 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
   const { selectedSystem, setSelectedSystem } = useSystemFilter();
   const queryClient = useQueryClient();
   const runAction = useAction();
+  const toast = useToast();
   const [viewMode, setViewMode] = useState('week'); // 'week' | 'month'
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
   const [selectedDayStr, setSelectedDayStr] = useState(formatDate(new Date()));
   const [exportModalVisible, setExportModalVisible] = useState(false);
   const [addTaskModalVisible, setAddTaskModalVisible] = useState(false);
+
+  // Tabs: 'pending' | 'approval' | 'done' | 'issues'
+  const [activeTab, setActiveTab] = useState(route?.params?.tab === 'approval' ? 'approval' : 'pending');
+  const [tabTaskPage, setTabTaskPage] = useState(1);
+  const TAB_PAGE_SIZE = 10;
+
+  // Selected checkbox IDs for bulk approval
+  const [selectedApprovalIds, setSelectedApprovalIds] = useState(new Set());
+
+  // Rejection modal state
+  const [rejectModalVisible, setRejectModalVisible] = useState(false);
+  const [rejectingLogIds, setRejectingLogIds] = useState([]);
+  const [rejectReason, setRejectReason] = useState('');
+  const [rejectError, setRejectError] = useState('');
+  const [reviewLoading, setReviewLoading] = useState(false);
+
+  // Sync route param tab if navigated with params: { tab: 'approval' }
+  useEffect(() => {
+    if (route?.params?.tab) {
+      setActiveTab(route.params.tab);
+    }
+  }, [route?.params?.tab]);
 
   // Handle openAddTask param from navigation redirects
   useEffect(() => {
@@ -111,30 +150,18 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
     staleTime: 30 * 1000,
   });
 
+  // Hook for pending approvals across all dates
+  const {
+    items: approvalQueueItems = [],
+    count: approvalQueueCount = 0,
+    errorMessage: approvalsErrorMessage,
+    refetch: refetchApprovals,
+  } = usePendingApprovals();
+
   const loading = rulesLoading || logsLoading;
-  const error = rulesError?.message || logsError?.message || '';
+  const error = rulesError?.message || logsError?.message || approvalsErrorMessage || '';
 
-  // Realtime subscription for task_logs invalidation
-  useEffect(() => {
-    if (!isConfigured || !supabase?.channel) return;
-
-    const channelId = `task_logs_${rangeStart}_${rangeEnd}_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const channel = supabase
-      .channel(channelId)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'task_logs' },
-        () => {
-          // Invalidate task logs query debounced
-          queryClient.invalidateQueries({ queryKey: ['task_logs'] });
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [rangeStart, rangeEnd, queryClient]);
+  // Note: task_logs realtime invalidation handled globally by useTaskLogsRealtime in ResponsiveAdminLayout
 
   // Expand due tasks with useMemo, filtered by selectedSystem if not 'ALL'
   const tasks = React.useMemo(() => {
@@ -171,6 +198,145 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
   // Worker Groups & Workers
   const { groups: workerGroupsList } = useWorkerGroups();
   const { data: workerData } = useWorkers();
+
+  const profilesMap = useMemo(() => {
+    const map = new Map();
+    if (workerData?.allUsers) {
+      workerData.allUsers.forEach((u) => map.set(u.id, u.full_name));
+    }
+    return map;
+  }, [workerData]);
+
+  // Invalidate queries after review
+  const invalidateAllAfterReview = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+    queryClient.invalidateQueries({ queryKey: ['pending_approvals'] });
+    queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
+    queryClient.invalidateQueries({ queryKey: ['activity_logs'] });
+  }, [queryClient]);
+
+  // Review RPC Execution (Approve / Reject)
+  const handleReviewLogs = async (logIds, decision, note = null) => {
+    if (!logIds || logIds.length === 0) return;
+
+    if (decision === 'reject' && (!note || !note.trim())) {
+      setRejectError('Please provide a reason for rejection.');
+      return;
+    }
+
+    try {
+      setReviewLoading(true);
+      if (isConfigured && supabase) {
+        const { data: count, error: rpcErr } = await supabase.rpc('review_task_log', {
+          p_log_ids: logIds,
+          p_decision: decision,
+          p_note: decision === 'reject' ? note.trim() : null,
+        });
+
+        if (rpcErr) {
+          if (rpcErr.code === '42703') {
+            throw new Error('Run the approval SQL in Supabase');
+          }
+          throw rpcErr;
+        }
+
+        if (count === 0) {
+          toast.info('Nothing to review (already handled)');
+        } else {
+          toast.success(
+            decision === 'approve'
+              ? `Approved ${count} ${count === 1 ? 'task' : 'tasks'}!`
+              : `Rejected ${count} ${count === 1 ? 'task' : 'tasks'}. Sent back to worker.`
+          );
+        }
+      }
+
+      setSelectedApprovalIds((prev) => {
+        const next = new Set(prev);
+        logIds.forEach((id) => next.delete(id));
+        return next;
+      });
+      setRejectModalVisible(false);
+      setRejectReason('');
+      setRejectError('');
+
+      invalidateAllAfterReview();
+    } catch (err) {
+      toast.error(err.message || 'Failed to review task.');
+    } finally {
+      setReviewLoading(false);
+    }
+  };
+
+  const confirmApproveSingle = (logId, equipmentName) => {
+    runAction({
+      confirm: {
+        title: 'Approve Task?',
+        message: `Approve maintenance for "${equipmentName || 'Equipment'}"? It will be marked as done and recorded.`,
+        confirmText: 'Approve',
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'checkmark-circle-outline',
+      },
+      action: async () => {
+        await handleReviewLogs([logId], 'approve');
+      },
+    });
+  };
+
+  const openRejectModal = (logIds) => {
+    setRejectingLogIds(logIds);
+    setRejectReason('');
+    setRejectError('');
+    setRejectModalVisible(true);
+  };
+
+  const confirmBulkApprove = () => {
+    const ids = Array.from(selectedApprovalIds);
+    if (ids.length === 0) return;
+
+    runAction({
+      confirm: {
+        title: `Approve ${ids.length} Selected Tasks?`,
+        message: `Approve ${ids.length} maintenance submissions at once? They will be marked as done.`,
+        confirmText: `Approve (${ids.length})`,
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'checkmark-circle-outline',
+      },
+      action: async () => {
+        await handleReviewLogs(ids, 'approve');
+      },
+    });
+  };
+
+  const confirmApproveAll = () => {
+    const ids = approvalQueueItems.map((item) => item.id);
+    if (ids.length === 0) return;
+
+    runAction({
+      confirm: {
+        title: `Approve All ${ids.length} Waiting Tasks?`,
+        message: `Are you sure you want to approve all ${ids.length} submitted tasks across all dates?`,
+        confirmText: `Approve All (${ids.length})`,
+        cancelText: 'Cancel',
+        tone: 'default',
+        icon: 'checkmark-circle-outline',
+      },
+      action: async () => {
+        await handleReviewLogs(ids, 'approve');
+      },
+    });
+  };
+
+  const toggleApprovalSelect = (id) => {
+    setSelectedApprovalIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
   // Filter by Assigned Group: 'ALL' | 'UNASSIGNED' | groupId
   const [groupFilter, setGroupFilter] = useState('ALL');
@@ -475,8 +641,42 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
 
   // Tasks for the selected day, using filteredTasks
   const selectedDayTasks = filteredTasks.filter((t) => t.due_date === selectedDayStr);
+
+  // Tab counts for selected day
+  const pendingDayTasks = useMemo(() => {
+    return selectedDayTasks.filter((t) => t.status === 'pending' || t.status === 'rejected');
+  }, [selectedDayTasks]);
+
+  const doneDayTasks = useMemo(() => {
+    return selectedDayTasks.filter((t) => t.status === 'done');
+  }, [selectedDayTasks]);
+
+  const issuesDayTasks = useMemo(() => {
+    return selectedDayTasks.filter((t) => t.status === 'issue' || t.status === 'skipped');
+  }, [selectedDayTasks]);
+
+  // Active list based on activeTab
+  const activeTabList = useMemo(() => {
+    if (activeTab === 'approval') return approvalQueueItems;
+    if (activeTab === 'done') return doneDayTasks;
+    if (activeTab === 'issues') return issuesDayTasks;
+    return pendingDayTasks;
+  }, [activeTab, approvalQueueItems, doneDayTasks, issuesDayTasks, pendingDayTasks]);
+
+  // Reset page when tab, day or filter changes
+  useEffect(() => {
+    setTabTaskPage(1);
+  }, [activeTab, selectedDayStr, selectedSystem, groupFilter]);
+
+  // Paginated tab list
+  const paginatedTabTasks = useMemo(() => {
+    const start = (tabTaskPage - 1) * TAB_PAGE_SIZE;
+    return activeTabList.slice(start, start + TAB_PAGE_SIZE);
+  }, [activeTabList, tabTaskPage]);
+
   const weekNum = getWorkWeekNumber(currentDateStr);
   const monthInfo = getMonthRange(currentDateStr);
+  const todayLocalStr = formatDate(new Date());
 
   return (
     <View style={styles.screen}>
@@ -574,152 +774,274 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
           renderWeekView()
         )}
 
-        {/* Selected Day Task List */}
+        {/* TAB STRIP: Pending (n) | For approval (n) | Done (n) | Issues / Skipped (n) */}
+        <View style={styles.tabStrip}>
+          <TouchableOpacity
+            style={[styles.tabItem, activeTab === 'pending' && styles.tabItemActive]}
+            onPress={() => setActiveTab('pending')}
+          >
+            <Text style={[styles.tabText, activeTab === 'pending' && styles.tabTextActive]}>
+              Pending ({pendingDayTasks.length})
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[
+              styles.tabItem,
+              activeTab === 'approval' && styles.tabItemActive,
+              approvalQueueCount > 0 && styles.tabItemHighlight,
+            ]}
+            onPress={() => setActiveTab('approval')}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+              <Text style={[styles.tabText, activeTab === 'approval' && styles.tabTextActive]}>
+                For approval ({approvalQueueCount})
+              </Text>
+              {approvalQueueCount > 0 && (
+                <View style={styles.approvalBadgeMini}>
+                  <Text style={styles.approvalBadgeMiniText}>
+                    {approvalQueueCount > 99 ? '99+' : approvalQueueCount}
+                  </Text>
+                </View>
+              )}
+            </View>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.tabItem, activeTab === 'done' && styles.tabItemActive]}
+            onPress={() => setActiveTab('done')}
+          >
+            <Text style={[styles.tabText, activeTab === 'done' && styles.tabTextActive]}>
+              Done ({doneDayTasks.length})
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.tabItem, activeTab === 'issues' && styles.tabItemActive]}
+            onPress={() => setActiveTab('issues')}
+          >
+            <Text style={[styles.tabText, activeTab === 'issues' && styles.tabTextActive]}>
+              Issues / Skipped ({issuesDayTasks.length})
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Tasks Section */}
         <View style={styles.dayTasksSection}>
           <View style={styles.dayTasksHeader}>
             <View>
               <Text style={styles.dayTasksHeading}>
-                Tasks Scheduled for {selectedDayStr}
+                {activeTab === 'approval'
+                  ? 'All Pending Task Approvals (Queue)'
+                  : `Tasks Scheduled for ${selectedDayStr}`}
               </Text>
               <Text style={styles.dayTasksSub}>
-                {selectedDayTasks.length} {selectedDayTasks.length === 1 ? 'task' : 'tasks'}
+                {activeTabList.length} {activeTabList.length === 1 ? 'task' : 'tasks'}
               </Text>
             </View>
 
-            {/* Assigned Worker Group filter pills */}
-            <View style={styles.assigneeFilterBar}>
-              <Text style={styles.assigneeFilterLabel}>Worker Group:</Text>
-              <TouchableOpacity
-                style={[
-                  styles.assigneeFilterPill,
-                  groupFilter === 'ALL' && styles.assigneeFilterPillActive,
-                ]}
-                onPress={() => setGroupFilter('ALL')}
-              >
-                <Text
-                  style={[
-                    styles.assigneeFilterText,
-                    groupFilter === 'ALL' && styles.assigneeFilterTextActive,
-                  ]}
-                >
-                  All
-                </Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[
-                  styles.assigneeFilterPill,
-                  groupFilter === 'UNASSIGNED' && styles.assigneeFilterPillActive,
-                ]}
-                onPress={() => setGroupFilter('UNASSIGNED')}
-              >
-                <Text
-                  style={[
-                    styles.assigneeFilterText,
-                    groupFilter === 'UNASSIGNED' && styles.assigneeFilterTextActive,
-                  ]}
-                >
-                  Unassigned
-                </Text>
-              </TouchableOpacity>
-              {workerGroupsList.map((g) => {
-                const isSelected = groupFilter === g.id;
-                return (
+            {/* If in 'approval' tab, show bulk approve controls */}
+            {activeTab === 'approval' ? (
+              <View style={styles.approvalActionRow}>
+                {selectedApprovalIds.size > 0 && (
                   <TouchableOpacity
-                    key={g.id}
+                    style={[styles.bulkApproveBtn, { backgroundColor: '#0EA5E9' }]}
+                    onPress={confirmBulkApprove}
+                  >
+                    <Ionicons name="checkmark-done" size={16} color={colors.white} />
+                    <Text style={styles.bulkApproveText}>
+                      Approve selected ({selectedApprovalIds.size})
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {approvalQueueItems.length > 0 && (
+                  <TouchableOpacity
+                    style={[styles.bulkApproveBtn, { backgroundColor: '#0284C7' }]}
+                    onPress={confirmApproveAll}
+                  >
+                    <Ionicons name="checkmark-circle" size={16} color={colors.white} />
+                    <Text style={styles.bulkApproveText}>Approve all ({approvalQueueItems.length})</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
+            ) : (
+              /* Group filter pills for day tabs */
+              <View style={styles.assigneeFilterBar}>
+                <Text style={styles.assigneeFilterLabel}>Worker Group:</Text>
+                <TouchableOpacity
+                  style={[
+                    styles.assigneeFilterPill,
+                    groupFilter === 'ALL' && styles.assigneeFilterPillActive,
+                  ]}
+                  onPress={() => setGroupFilter('ALL')}
+                >
+                  <Text
                     style={[
-                      styles.assigneeFilterPill,
-                      isSelected && styles.assigneeFilterPillActive,
+                      styles.assigneeFilterText,
+                      groupFilter === 'ALL' && styles.assigneeFilterTextActive,
                     ]}
-                    onPress={() => setGroupFilter(g.id)}
                   >
-                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                      <View style={[styles.filterGroupDot, { backgroundColor: g.color || colors.primary }]} />
-                      <Text
-                        style={[
-                          styles.assigneeFilterText,
-                          isSelected && styles.assigneeFilterTextActive,
-                        ]}
-                      >
-                        {g.name}
-                      </Text>
-                    </View>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-
-          {selectedDayTasks.length === 0 ? (
-            <View style={styles.emptyDayBox}>
-              <Ionicons name="calendar-clear-outline" size={32} color={colors.textMuted} />
-              {selectedSystem && selectedSystem !== 'ALL' ? (
-                <>
-                  <Text style={styles.emptyDayText}>
-                    No tasks for System {selectedSystem} on this day.
+                    All
                   </Text>
-                  <TouchableOpacity
-                    style={styles.clearFilterBtn}
-                    onPress={() => setSelectedSystem('ALL')}
-                    activeOpacity={0.8}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.assigneeFilterPill,
+                    groupFilter === 'UNASSIGNED' && styles.assigneeFilterPillActive,
+                  ]}
+                  onPress={() => setGroupFilter('UNASSIGNED')}
+                >
+                  <Text
+                    style={[
+                      styles.assigneeFilterText,
+                      groupFilter === 'UNASSIGNED' && styles.assigneeFilterTextActive,
+                    ]}
                   >
-                    <Text style={styles.clearFilterBtnText}>Clear filter</Text>
-                  </TouchableOpacity>
-                </>
-              ) : (
-                <Text style={styles.emptyDayText}>No tasks scheduled for {selectedDayStr}</Text>
-              )}
-            </View>
-          ) : (
-            selectedDayTasks.map((t) => {
-              return (
-                <View key={t.id} style={styles.ruleCard}>
-                  <View style={styles.ruleCardTop}>
-                    <View style={styles.badgeLine}>
-                      <FrequencyBadge freq={t.frequency} size="medium" />
-                      <View style={styles.ruleNameBox}>
-                        <Text style={styles.ruleEqName}>{t.equipment?.name || 'Equipment'}</Text>
-                        <Text style={styles.ruleGroupName}>
-                          {t.category?.code}. {t.category?.name} • {t.group?.name}
-                          {t.equipment?.area ? ` (${t.equipment.area})` : ''}
+                    Unassigned
+                  </Text>
+                </TouchableOpacity>
+                {workerGroupsList.map((g) => {
+                  const isSelected = groupFilter === g.id;
+                  return (
+                    <TouchableOpacity
+                      key={g.id}
+                      style={[
+                        styles.assigneeFilterPill,
+                        isSelected && styles.assigneeFilterPillActive,
+                      ]}
+                      onPress={() => setGroupFilter(g.id)}
+                    >
+                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                        <View style={[styles.filterGroupDot, { backgroundColor: g.color || colors.primary }]} />
+                        <Text
+                          style={[
+                            styles.assigneeFilterText,
+                            isSelected && styles.assigneeFilterTextActive,
+                          ]}
+                        >
+                          {g.name}
                         </Text>
                       </View>
-                    </View>
-                    <StatusBadge status={t.status} />
-                  </View>
-
-                  {/* Worker Group Row */}
-                  <View style={styles.cardAssigneesRow}>
-                    <Text style={styles.cardAssigneesLabel}>Worker Group:</Text>
-                    <WorkerGroupBadge group={t.rule?.worker_group || t.worker_group} />
-                  </View>
-
-                  {t.notes ? (
-                    <Text style={styles.ruleCardNotes}>Admin Note: {t.notes}</Text>
-                  ) : null}
-
-                  {/* Edit & Delete actions for Admin */}
-                  <View style={styles.ruleActionsRow}>
-                    <TouchableOpacity
-                      style={styles.ruleActionEdit}
-                      onPress={() => openEditRule(t.rule)}
-                    >
-                      <Ionicons name="create-outline" size={16} color={colors.primaryDark} />
-                      <Text style={styles.ruleActionEditText}>Edit Rule & Workers</Text>
                     </TouchableOpacity>
+                  );
+                })}
+              </View>
+            )}
+          </View>
 
-                    <TouchableOpacity
-                      style={styles.ruleActionDelete}
-                      onPress={() => handleDeleteRule(t.rule_id)}
-                    >
-                      <Ionicons name="trash-outline" size={16} color={colors.danger} />
-                      <Text style={styles.ruleActionDeleteText}>Delete Rule</Text>
-                    </TouchableOpacity>
-                  </View>
+          {/* List Content */}
+          {activeTabList.length === 0 ? (
+            <View style={styles.emptyDayBox}>
+              <Ionicons
+                name={activeTab === 'approval' ? 'checkmark-done-circle-outline' : 'calendar-clear-outline'}
+                size={36}
+                color={colors.textMuted}
+              />
+              <Text style={styles.emptyDayText}>
+                {activeTab === 'approval'
+                  ? 'No tasks waiting for approval.'
+                  : activeTab === 'done'
+                  ? `No tasks completed and approved for ${selectedDayStr}.`
+                  : activeTab === 'issues'
+                  ? `No issues or skipped tasks for ${selectedDayStr}.`
+                  : `No pending tasks scheduled for ${selectedDayStr}.`}
+              </Text>
+            </View>
+          ) : (
+            <>
+              {paginatedTabTasks.map((t) => {
+                const isSelected = activeTab === 'approval' && selectedApprovalIds.has(t.id);
+                return (
+                  <TaskLogCard
+                    key={t.id}
+                    item={t}
+                    tab={activeTab}
+                    isSelected={isSelected}
+                    onToggleSelect={toggleApprovalSelect}
+                    onApprove={(id, name) => confirmApproveSingle(id, name)}
+                    onReject={(item) => openRejectModal([item.id])}
+                    onEditRule={(rule) => openEditRule(rule)}
+                    profilesMap={profilesMap}
+                  />
+                );
+              })}
+
+              {/* 10 per page pagination */}
+              {activeTabList.length > TAB_PAGE_SIZE && (
+                <View style={{ marginTop: 12, marginBottom: 16 }}>
+                  <Pagination
+                    currentPage={tabTaskPage}
+                    totalItems={activeTabList.length}
+                    pageSize={TAB_PAGE_SIZE}
+                    onPageChange={setTabTaskPage}
+                  />
                 </View>
-              );
-            })
+              )}
+            </>
           )}
         </View>
+
+        {/* REJECT MODAL WITH REQUIRED REASON */}
+        <Modal
+          visible={rejectModalVisible}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setRejectModalVisible(false)}
+        >
+          <View style={styles.modalOverlay}>
+            <View style={styles.modalContent}>
+              <View style={styles.modalHeader}>
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <Ionicons name="close-circle" size={22} color="#DC2626" />
+                  <Text style={styles.modalTitle}>Reject Task Submission</Text>
+                </View>
+                <TouchableOpacity onPress={() => setRejectModalVisible(false)}>
+                  <Ionicons name="close" size={22} color={colors.dark} />
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.rejectModalDesc}>
+                Please state the reason for rejecting this maintenance task. The worker will be required to redo and resubmit.
+              </Text>
+
+              <Text style={styles.modalFieldLabel}>Reason for Rejection *</Text>
+              <TextInput
+                style={[styles.modalInput, { minHeight: 90, textAlignVertical: 'top' }]}
+                value={rejectReason}
+                onChangeText={(txt) => {
+                  setRejectReason(txt);
+                  if (rejectError) setRejectError('');
+                }}
+                placeholder="E.g. Torque check incomplete, filter cleaning was skipped..."
+                placeholderTextColor="#A1A1AA"
+                multiline
+              />
+              {rejectError ? <Text style={styles.rejectErrorText}>{rejectError}</Text> : null}
+
+              <View style={styles.modalBtnRow}>
+                <TouchableOpacity
+                  style={styles.modalCancelBtn}
+                  onPress={() => setRejectModalVisible(false)}
+                  disabled={reviewLoading}
+                >
+                  <Text style={styles.modalCancelText}>Cancel</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.modalSaveBtn, { backgroundColor: '#DC2626' }]}
+                  onPress={() => handleReviewLogs(rejectingLogIds, 'reject', rejectReason)}
+                  disabled={reviewLoading}
+                >
+                  {reviewLoading ? (
+                    <ActivityIndicator color={colors.white} size="small" />
+                  ) : (
+                    <Text style={styles.modalSaveText}>Confirm Rejection</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
 
         {/* Dev Diagnostics Line */}
         {__DEV__ && (
@@ -1302,6 +1624,170 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: colors.danger,
     marginLeft: 4,
+  },
+  // Phase 2 Tabs & Approval Styles
+  tabStrip: {
+    flexDirection: 'row',
+    backgroundColor: '#F1F5F9',
+    borderRadius: 10,
+    padding: 4,
+    marginBottom: 16,
+    gap: 4,
+    flexWrap: 'wrap',
+  },
+  tabItem: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 8,
+  },
+  tabItemActive: {
+    backgroundColor: colors.white,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.1,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  tabItemHighlight: {
+    backgroundColor: '#E0F2FE',
+  },
+  tabText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  tabTextActive: {
+    color: colors.dark,
+    fontWeight: '700',
+  },
+  approvalBadgeMini: {
+    backgroundColor: '#0EA5E9',
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 10,
+  },
+  approvalBadgeMiniText: {
+    color: colors.white,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  approvalActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flexWrap: 'wrap',
+  },
+  bulkApproveBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 8,
+  },
+  bulkApproveText: {
+    color: colors.white,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  ruleCardSelected: {
+    borderColor: '#0EA5E9',
+    backgroundColor: '#F0F9FF',
+  },
+  ruleCardOverdue: {
+    borderColor: '#FCA5A5',
+    backgroundColor: '#FFFBFB',
+  },
+  dueDateBadge: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: colors.primaryDark,
+    backgroundColor: '#F0F9FF',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  overdueBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#DC2626',
+  },
+  workerActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#F8FAFC',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+    marginTop: 6,
+  },
+  workerActionText: {
+    fontSize: 11,
+    color: '#334155',
+  },
+  bold: {
+    fontWeight: '700',
+  },
+  rejectionNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#FEF2F2',
+    paddingHorizontal: 8,
+    paddingVertical: 5,
+    borderRadius: 6,
+    marginTop: 6,
+  },
+  rejectionNoticeText: {
+    fontSize: 11,
+    color: '#DC2626',
+    fontWeight: '600',
+  },
+  approvalButtonsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 10,
+  },
+  approvalActionBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: 8,
+  },
+  approveBtn: {
+    backgroundColor: '#0EA5E9',
+  },
+  approveBtnText: {
+    color: colors.white,
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  rejectBtn: {
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: '#FCA5A5',
+  },
+  rejectBtnText: {
+    color: '#DC2626',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  rejectModalDesc: {
+    fontSize: 13,
+    color: colors.textSecondary,
+    marginBottom: 14,
+    lineHeight: 18,
+  },
+  rejectErrorText: {
+    color: '#DC2626',
+    fontSize: 12,
+    marginTop: 4,
+    fontWeight: '600',
   },
   filterGroupDot: {
     width: 8,

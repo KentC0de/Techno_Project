@@ -15,7 +15,29 @@ export function mapError(err, fallback = 'Action failed. Please try again.') {
 
   const code = err.code || '';
   const message = (err.message || '').toLowerCase();
-  const details = (err.details || '').toLowerCase();
+
+  // Daily Reports & Task Log trigger/RPC errors
+  if (message.includes('already part of a submitted report')) {
+    return 'This task is already in a submitted report.';
+  }
+  if (message.includes('workers can only record')) {
+    return 'You can only mark tasks as completed here.';
+  }
+  if (message.includes('already submitted')) {
+    return 'This daily report has already been submitted.';
+  }
+  if (message.includes('fix the tasks returned by the admin before resubmitting')) {
+    return 'Fix the tasks returned by the admin before resubmitting.';
+  }
+  if (message.includes('not a member of this worker group')) {
+    return 'You are not a member of this worker group.';
+  }
+  if (message.includes('future date')) {
+    return 'Cannot submit a report for a future date.';
+  }
+  if (message.includes('not waiting for review')) {
+    return 'This report is not waiting for review.';
+  }
 
   // 1. PostgreSQL Error Codes
   // Unique violation
@@ -43,19 +65,16 @@ export function mapError(err, fallback = 'Action failed. Please try again.') {
     return 'You do not have permission to perform this action.';
   }
 
-  // Missing RPC / function in PostgreSQL
+  // Missing column / RPC / table in PostgreSQL
   if (
+    code === '42703' ||
     code === '42883' ||
     code === 'PGRST202' ||
-    message.includes('function') && message.includes('does not exist') ||
+    code === '42P01' ||
+    (message.includes('function') && message.includes('does not exist')) ||
     message.includes('could not find the function')
   ) {
-    return 'Database update needed: please run the latest SQL script in Supabase.';
-  }
-
-  // Table not found
-  if (code === '42P01') {
-    return 'Database table missing: please run the setup SQL in Supabase.';
+    return 'Run the daily reports SQL in Supabase';
   }
 
   // 2. Auth Errors

@@ -1,7 +1,8 @@
-﻿export const TASK_STATUS_CONFIG = {
+export const TASK_STATUS_CONFIG = {
   pending: {
     key: 'pending',
     label: 'Pending',
+    shortLabel: 'Pending',
     icon: 'time-outline',
     textColor: '#52525B',
     borderColor: '#D4D4D8',
@@ -11,60 +12,61 @@
   overdue: {
     key: 'overdue',
     label: 'Overdue',
+    shortLabel: 'Overdue',
     icon: 'alert-circle-outline',
     textColor: '#DC2626',
     borderColor: '#F87171',
     bgColor: '#FEF2F2',
     isOutline: true,
   },
-  submitted: {
-    key: 'submitted',
-    label: 'Waiting for admin approval',
-    shortLabel: 'Waiting',
-    icon: 'time',
+  completed: {
+    key: 'completed',
+    label: 'Completed (not reported yet)',
+    shortLabel: 'Completed',
+    icon: 'checkmark-circle-outline',
     textColor: '#0284C7',
     borderColor: '#0EA5E9',
     bgColor: '#F0F9FF',
     isOutline: true,
   },
+  issue: {
+    key: 'issue',
+    label: 'Completed with issue',
+    shortLabel: 'Issue',
+    icon: 'warning-outline',
+    textColor: '#B45309',
+    borderColor: '#F59E0B',
+    bgColor: '#FEF3C7',
+    isOutline: true,
+  },
+  submitted: {
+    key: 'submitted',
+    label: 'Submitted, waiting review',
+    shortLabel: 'Submitted',
+    icon: 'time',
+    textColor: '#0284C7',
+    borderColor: '#0EA5E9',
+    bgColor: '#E0F2FE',
+    isOutline: true,
+  },
   done: {
     key: 'done',
-    label: 'Done',
-    shortLabel: 'Done',
+    label: 'Approved',
+    shortLabel: 'Approved',
     icon: 'checkmark-circle',
     textColor: '#FFFFFF',
     borderColor: '#0EA5E9',
     bgColor: '#0EA5E9',
     isOutline: false,
   },
-  rejected: {
-    key: 'rejected',
-    label: 'Rejected',
-    shortLabel: 'Rejected',
+  returned: {
+    key: 'returned',
+    label: 'Returned for correction',
+    shortLabel: 'Returned',
     icon: 'close-circle-outline',
     textColor: '#DC2626',
     borderColor: '#DC2626',
     bgColor: '#FEF2F2',
-    isOutline: true,
-  },
-  issue: {
-    key: 'issue',
-    label: 'Issue',
-    shortLabel: 'Issue',
-    icon: 'warning-outline',
-    textColor: '#0A0A0A',
-    borderColor: '#0A0A0A',
-    bgColor: '#FFFFFF',
-    isOutline: true,
-  },
-  skipped: {
-    key: 'skipped',
-    label: 'Skipped',
-    shortLabel: 'Skipped',
-    icon: 'play-forward-outline',
-    textColor: '#71717A',
-    borderColor: '#E4E4E7',
-    bgColor: '#F4F4F5',
     isOutline: true,
   },
 };
@@ -78,16 +80,14 @@ export function getTaskState(dueDate, log, todayLocal) {
   }
 
   const status = log.status;
+  const result = log.result;
+
+  if (status === 'draft') {
+    return result === 'issue' ? 'issue' : 'completed';
+  }
   if (status === 'submitted') return 'submitted';
   if (status === 'done') return 'done';
-  if (status === 'rejected') {
-    if (dueDate && todayLocal && dueDate < todayLocal) {
-      return 'overdue';
-    }
-    return 'rejected';
-  }
-  if (status === 'issue') return 'issue';
-  if (status === 'skipped') return 'skipped';
+  if (status === 'rejected') return 'returned';
 
   if (dueDate && todayLocal && dueDate < todayLocal) {
     return 'overdue';
@@ -99,25 +99,26 @@ export function computeTaskCounts(tasks = []) {
   const total = tasks.length;
   let done = 0;
   let submitted = 0;
-  let rejected = 0;
+  let completed = 0;
+  let issue = 0;
+  let returned = 0;
   let pending = 0;
   let overdue = 0;
-  let issue = 0;
-  let skipped = 0;
 
   for (const t of tasks) {
-    const s = t.status;
-    if (s === 'done') {
+    const log = t.log || (t.status && t.status !== 'pending' && t.status !== 'overdue' ? t : null);
+    const state = t.taskState || getTaskState(t.due_date, log, null);
+    if (state === 'done') {
       done++;
-    } else if (s === 'submitted') {
+    } else if (state === 'submitted') {
       submitted++;
-    } else if (s === 'rejected') {
-      rejected++;
-      if (t.isOverdue) overdue++;
-    } else if (s === 'issue') {
+    } else if (state === 'completed') {
+      completed++;
+    } else if (state === 'issue') {
       issue++;
-    } else if (s === 'skipped') {
-      skipped++;
+    } else if (state === 'returned') {
+      returned++;
+      if (t.isOverdue) overdue++;
     } else {
       pending++;
       if (t.isOverdue) overdue++;
@@ -131,11 +132,12 @@ export function computeTaskCounts(tasks = []) {
     done,
     submitted,
     waiting: submitted,
-    rejected,
+    completed,
+    issue,
+    returned,
+    rejected: returned,
     pending,
     overdue,
-    issue,
-    skipped,
     rate,
   };
 }

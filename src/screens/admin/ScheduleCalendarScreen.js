@@ -8,15 +8,18 @@ import {
   ActivityIndicator,
   Modal,
   TextInput,
-  Alert,
   Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   fetchScheduleRules,
-  fetchTaskLogs,
   updateScheduleRule,
   deleteScheduleRule,
+  countRuleTaskLogs,
+  deleteTaskLogById,
+  fetchTaskLogById,
+  fetchTaskLogs,
 } from '../../lib/dataService';
 import {
   formatDate,
@@ -28,84 +31,147 @@ import {
   daysInMonth,
   getIsoWeekday,
   buildDueTasks,
+  expandRuleDueDates,
 } from '../../utils/schedule';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase, isConfigured } from '../../lib/supabase';
 import { useAuth } from '../../context/AuthContext';
-import { useSystemFilter } from '../../context/SystemFilterContext';
+import { useSubmittedReportsCount } from '../../hooks/useSubmittedReportsCount';
+import { useCalendarFilters } from '../../hooks/useCalendarFilters';
 import Header from '../../components/Header';
 import PageContainer from '../../components/PageContainer';
 import Pagination from '../../components/Pagination';
-import { useBreakpoint } from '../../hooks/useBreakpoint';
 import FrequencyBadge from '../../components/FrequencyBadge';
-import StatusBadge from '../../components/StatusBadge';
 import TaskStatusChip from '../../components/TaskStatusChip';
 import TaskLogCard from '../../components/TaskLogCard';
 import ExportScheduleModal from '../../components/ExportScheduleModal';
 import TaskFormModal from '../../components/TaskFormModal';
-import WorkerGroupBadge from '../../components/WorkerGroupBadge';
 import WorkerGroupSelect from '../../components/WorkerGroupSelect';
+import FilterButton from '../../components/FilterButton';
+import ReportDetailSlideOver from '../../components/ReportDetailSlideOver';
 import { useWorkerGroups } from '../../hooks/useWorkerGroups';
 import { useWorkers } from '../../hooks/useWorkers';
 import { useAction } from '../../hooks/useAction';
-import { usePendingApprovals } from '../../hooks/usePendingApprovals';
+import { useTaskLogs } from '../../hooks/useTaskLogs';
 import { useToast } from '../../components/feedback';
-import { colors, layout } from '../../theme';
+import { mapError } from '../../utils/errorMessages';
+import { a11yRole } from '../../utils/a11y';
+import { colors } from '../../theme';
 
-function formatSimpleDateTime(isoStr) {
-  if (!isoStr) return '';
-  const d = new Date(isoStr);
-  if (isNaN(d.getTime())) return isoStr;
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  const h = String(d.getHours()).padStart(2, '0');
-  const min = String(d.getMinutes()).padStart(2, '0');
-  return `${y}-${m}-${day} ${h}:${min}`;
-}
-
-function getInitials(name) {
-  if (!name) return '??';
-  const parts = name.trim().split(/\s+/);
-  if (parts.length === 1) return parts[0].substring(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
+function getStatusPill(status) {
+  switch (status) {
+    case 'submitted':
+      return {
+        label: 'Submitted - Needs Review',
+        bg: '#FEF3C7',
+        text: '#B45309',
+        dot: '#F59E0B',
+      };
+    case 'reviewed':
+      return {
+        label: 'Reviewed',
+        bg: '#E0F2FE',
+        text: '#0284C7',
+        dot: '#0EA5E9',
+      };
+    case 'returned':
+      return {
+        label: 'Returned for Correction',
+        bg: '#FEF2F2',
+        text: '#DC2626',
+        dot: '#DC2626',
+      };
+    case 'draft':
+      return {
+        label: 'Draft',
+        bg: '#F1F5F9',
+        text: '#475569',
+        dot: '#64748B',
+      };
+    default:
+      return null;
+  }
 }
 
 export default function ScheduleCalendarScreen({ navigation, route }) {
   const { user } = useAuth();
-  const { selectedSystem, setSelectedSystem } = useSystemFilter();
+  const isAdmin = user?.role === 'admin';
   const queryClient = useQueryClient();
   const runAction = useAction();
   const toast = useToast();
+
+  const [filters, setFilters] = useCalendarFilters('tasks');
   const [viewMode, setViewMode] = useState('week'); // 'week' | 'month'
   const [currentDateStr, setCurrentDateStr] = useState(formatDate(new Date()));
   const [selectedDayStr, setSelectedDayStr] = useState(formatDate(new Date()));
+  const [searchQuery, setSearchQuery] = useState('');
   const [exportModalVisible, setExportModalVisible] = useState(false);
   const [addTaskModalVisible, setAddTaskModalVisible] = useState(false);
 
-  // Tabs: 'pending' | 'approval' | 'done' | 'issues'
-  const [activeTab, setActiveTab] = useState(route?.params?.tab === 'approval' ? 'approval' : 'pending');
-  const [tabTaskPage, setTabTaskPage] = useState(1);
-  const TAB_PAGE_SIZE = 10;
+  // Group expand state and pagination
+  const [expandedDayGroups, setExpandedDayGroups] = useState({});
+  const [dayPanelPage, setDayPanelPage] = useState(1);
+  const [reportsPage, setReportsPage] = useState(1);
+  const DAY_PAGE_SIZE = 10;
+  const REPORTS_PAGE_SIZE = 10;
 
-  // Selected checkbox IDs for bulk approval
-  const [selectedApprovalIds, setSelectedApprovalIds] = useState(new Set());
+  // Slide-over state synced with route params
+  const [slideOverReport, setSlideOverReport] = useState({
+    visible: false,
+    groupId: null,
+    date: null,
+    reportId: null,
+  });
 
-  // Rejection modal state
-  const [rejectModalVisible, setRejectModalVisible] = useState(false);
-  const [rejectingLogIds, setRejectingLogIds] = useState([]);
-  const [rejectReason, setRejectReason] = useState('');
-  const [rejectError, setRejectError] = useState('');
-  const [reviewLoading, setReviewLoading] = useState(false);
+  // Submitted reports count for badge
+  const { count: submittedReportsCount } = useSubmittedReportsCount({ enabled: isAdmin });
 
-  // Sync route param tab if navigated with params: { tab: 'approval' }
+  // Handle route params: view ('tasks' | 'reports'), reportGroupId, reportDate
   useEffect(() => {
-    if (route?.params?.tab) {
-      setActiveTab(route.params.tab);
+    if (route?.params?.view) {
+      setFilters((prev) => (prev.view === route.params.view ? prev : { ...prev, view: route.params.view }));
     }
-  }, [route?.params?.tab]);
+    if (route?.params?.reportGroupId || route?.params?.reportDate) {
+      setSlideOverReport({
+        visible: true,
+        groupId: route.params.reportGroupId || null,
+        date: route.params.reportDate || selectedDayStr,
+        reportId: route.params.reportId || null,
+      });
+    }
+  }, [route?.params?.view, route?.params?.reportGroupId, route?.params?.reportDate, route?.params?.reportId, selectedDayStr, setFilters]);
 
-  // Handle openAddTask param from navigation redirects
+  // Handle deep link logId / dueDate
+  useEffect(() => {
+    const paramDueDate = route?.params?.dueDate;
+    const paramLogId = route?.params?.logId;
+    if (!paramDueDate && !paramLogId) return;
+
+    let cancelled = false;
+    if (paramDueDate) {
+      setCurrentDateStr(paramDueDate);
+      setSelectedDayStr(paramDueDate);
+    }
+    if (paramLogId) {
+      (async () => {
+        try {
+          const ctx = await fetchTaskLogById(paramLogId);
+          if (cancelled || !ctx?.log) return;
+          if (ctx.log.due_date) {
+            setCurrentDateStr(ctx.log.due_date);
+            setSelectedDayStr(ctx.log.due_date);
+          }
+        } catch (_) {}
+      })();
+    }
+    if (navigation?.setParams) {
+      navigation.setParams({ logId: undefined, dueDate: undefined });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [route?.params?.logId, route?.params?.dueDate, navigation]);
+
+  // Handle openAddTask param
   useEffect(() => {
     if (route?.params?.openAddTask) {
       setAddTaskModalVisible(true);
@@ -115,8 +181,8 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
     }
   }, [route?.params?.openAddTask, navigation]);
 
-  // Calculate range depending on view mode
-  const { rangeStart, rangeEnd } = React.useMemo(() => {
+  // Visible range for calendar week/month
+  const { rangeStart, rangeEnd } = useMemo(() => {
     if (viewMode === 'month') {
       const m = getMonthRange(currentDateStr);
       return { rangeStart: m.start, rangeEnd: m.end };
@@ -126,7 +192,7 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
     }
   }, [viewMode, currentDateStr]);
 
-  // Query Schedule Rules (cached for 30s)
+  // Query Schedule Rules
   const {
     data: rules = [],
     isLoading: rulesLoading,
@@ -138,65 +204,17 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
     staleTime: 30 * 1000,
   });
 
-  // Query Task Logs for visible range
+  // Query Task Logs for visible range (+ selectedDayStr)
   const {
-    data: logs = [],
+    logs = [],
+    contexts: logContexts = [],
     isLoading: logsLoading,
     error: logsError,
     refetch: refetchLogs,
-  } = useQuery({
-    queryKey: ['task_logs', rangeStart, rangeEnd],
-    queryFn: () => fetchTaskLogs(rangeStart, rangeEnd),
-    staleTime: 30 * 1000,
-  });
-
-  // Hook for pending approvals across all dates
-  const {
-    items: approvalQueueItems = [],
-    count: approvalQueueCount = 0,
-    errorMessage: approvalsErrorMessage,
-    refetch: refetchApprovals,
-  } = usePendingApprovals();
-
-  const loading = rulesLoading || logsLoading;
-  const error = rulesError?.message || logsError?.message || approvalsErrorMessage || '';
-
-  // Note: task_logs realtime invalidation handled globally by useTaskLogsRealtime in ResponsiveAdminLayout
-
-  // Expand due tasks with useMemo, filtered by selectedSystem if not 'ALL'
-  const tasks = React.useMemo(() => {
-    if (!rules || rules.length === 0) return [];
-    const allDueTasks = buildDueTasks(rules, logs, rangeStart, rangeEnd);
-    if (!selectedSystem || selectedSystem === 'ALL') {
-      return allDueTasks;
-    }
-    return allDueTasks.filter((t) => {
-      const code = t.category?.code || t.equipment?.group?.category?.code || t.equipment?.groups?.categories?.code || t.categoryCode;
-      return code === selectedSystem;
-    });
-  }, [rules, logs, rangeStart, rangeEnd, selectedSystem]);
-
-  const loadData = useCallback(() => {
-    refetchRules();
-    refetchLogs();
-  }, [refetchRules, refetchLogs]);
-
-  // Edit Rule Modal State
-  const [editModalVisible, setEditModalVisible] = useState(false);
-  const [editingRule, setEditingRule] = useState(null);
-  const [editFreq, setEditFreq] = useState('d');
-  const [editStartDate, setEditStartDate] = useState('');
-  const [editEndDate, setEditEndDate] = useState('');
-  const [editWeekday, setEditWeekday] = useState(1);
-  const [editNotes, setEditNotes] = useState('');
-  const [editGroupId, setEditGroupId] = useState(null);
-  const [selectedTaskIds, setSelectedTaskIds] = useState(new Set());
-  const [bulkGroupModalVisible, setBulkGroupModalVisible] = useState(false);
-  const [bulkTargetGroupId, setBulkTargetGroupId] = useState(null);
-  const [modalSaving, setModalSaving] = useState(false);
+  } = useTaskLogs(rangeStart, rangeEnd, { extraDate: selectedDayStr });
 
   // Worker Groups & Workers
-  const { groups: workerGroupsList } = useWorkerGroups();
+  const { groups: workerGroupsList = [] } = useWorkerGroups();
   const { data: workerData } = useWorkers();
 
   const profilesMap = useMemo(() => {
@@ -209,242 +227,470 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
 
   // Invalidate queries after review
   const invalidateAllAfterReview = useCallback(() => {
-    queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+    queryClient.invalidateQueries({ queryKey: ['approvals'] });
     queryClient.invalidateQueries({ queryKey: ['pending_approvals'] });
+    queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
+    queryClient.invalidateQueries({ queryKey: ['task_logs'] });
     queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
+    queryClient.invalidateQueries({ queryKey: ['daily_reports'] });
+    queryClient.invalidateQueries({ queryKey: ['submitted_reports_count'] });
     queryClient.invalidateQueries({ queryKey: ['activity_logs'] });
   }, [queryClient]);
 
-  // Review RPC Execution (Approve / Reject)
-  const handleReviewLogs = async (logIds, decision, note = null) => {
-    if (!logIds || logIds.length === 0) return;
+  // Date range for reports view based on filters.range
+  const reportsRange = useMemo(() => {
+    const today = new Date();
+    if (filters.range === 'week') {
+      const w = getWorkWeek(selectedDayStr || formatDate(today));
+      return { start: w.start, end: w.end };
+    }
+    if (filters.range === 'last7') {
+      return { start: formatDate(addDays(today, -6)), end: formatDate(today) };
+    }
+    // Default: selected day
+    return { start: selectedDayStr, end: selectedDayStr };
+  }, [filters.range, selectedDayStr]);
 
-    if (decision === 'reject' && (!note || !note.trim())) {
-      setRejectError('Please provide a reason for rejection.');
-      return;
+  // Query daily_reports for Reports view
+  const { data: dailyReports = [], isLoading: dailyReportsLoading } = useQuery({
+    queryKey: ['daily_reports', 'calendar_view', reportsRange.start, reportsRange.end],
+    queryFn: async () => {
+      if (!isConfigured || !supabase) return [];
+      const { data, error } = await supabase
+        .from('daily_reports')
+        .select('*')
+        .gte('report_date', reportsRange.start)
+        .lte('report_date', reportsRange.end);
+      if (error) {
+        if (error.code === '42P01' || error.code === '42703') return [];
+        throw error;
+      }
+      return data || [];
+    },
+    staleTime: 15 * 1000,
+  });
+
+  // Query additional task logs for reports range if outside calendar range
+  const { data: reportsRangeLogs = [] } = useQuery({
+    queryKey: ['task_logs', 'reports_range', reportsRange.start, reportsRange.end],
+    queryFn: () => fetchTaskLogs(reportsRange.start, reportsRange.end),
+    staleTime: 15 * 1000,
+  });
+
+  // Expand due tasks for the calendar view, filtered by system
+  const tasks = useMemo(() => {
+    if (!rules || rules.length === 0) return [];
+    const allDueTasks = buildDueTasks(rules, logs, rangeStart, rangeEnd);
+    if (!filters.system || filters.system === 'ALL') {
+      return allDueTasks;
+    }
+    return allDueTasks.filter((t) => {
+      const code =
+        t.category?.code ||
+        t.equipment?.group?.category?.code ||
+        t.equipment?.groups?.categories?.code ||
+        t.categoryCode;
+      return code === filters.system;
+    });
+  }, [rules, logs, rangeStart, rangeEnd, filters.system]);
+
+  // Filter tasks by group filter
+  const filteredTasks = useMemo(() => {
+    if (!filters.group || filters.group === 'all') return tasks;
+    return tasks.filter((t) => {
+      const gId = t.rule?.worker_group_id || t.worker_group_id;
+      if (filters.group === 'unassigned') {
+        return !gId;
+      }
+      return gId === filters.group;
+    });
+  }, [tasks, filters.group]);
+
+  // Tasks for selected day enriched with context
+  const selectedDayTasks = useMemo(() => {
+    const contextByKey = new Map();
+    for (const ctx of logContexts) {
+      if (ctx?.log?.rule_id && ctx?.log?.due_date) {
+        contextByKey.set(`${ctx.log.rule_id}_${ctx.log.due_date}`, ctx);
+      }
     }
 
-    try {
-      setReviewLoading(true);
-      if (isConfigured && supabase) {
-        const { data: count, error: rpcErr } = await supabase.rpc('review_task_log', {
-          p_log_ids: logIds,
-          p_decision: decision,
-          p_note: decision === 'reject' ? note.trim() : null,
-        });
+    const seenKeys = new Set();
+    const enriched = filteredTasks
+      .filter((t) => t.due_date === selectedDayStr)
+      .map((t) => {
+        const key = `${t.rule_id}_${t.due_date}`;
+        seenKeys.add(key);
+        const ctx = contextByKey.get(key);
+        if (!ctx) return t;
+        return {
+          ...t,
+          ...ctx.log,
+          id: ctx.log.id || t.id,
+          log: ctx.log,
+          rule: ctx.rule || t.rule,
+          equipment: ctx.equipment || t.equipment,
+          group: ctx.group || t.group,
+          category: ctx.category || t.category,
+          workerGroup: ctx.workerGroup || t.rule?.worker_group || null,
+          worker_group: ctx.workerGroup || t.rule?.worker_group || null,
+          worker: ctx.worker || null,
+          approver: ctx.approver || null,
+          submitterName: ctx.worker?.full_name || 'Worker',
+          approverName: ctx.approver?.full_name || null,
+        };
+      });
 
-        if (rpcErr) {
-          if (rpcErr.code === '42703') {
-            throw new Error('Run the approval SQL in Supabase');
-          }
-          throw rpcErr;
-        }
+    for (const ctx of logContexts) {
+      const log = ctx?.log;
+      if (!log || log.due_date !== selectedDayStr) continue;
+      const key = `${log.rule_id}_${log.due_date}`;
+      if (seenKeys.has(key)) continue;
 
-        if (count === 0) {
-          toast.info('Nothing to review (already handled)');
-        } else {
-          toast.success(
-            decision === 'approve'
-              ? `Approved ${count} ${count === 1 ? 'task' : 'tasks'}!`
-              : `Rejected ${count} ${count === 1 ? 'task' : 'tasks'}. Sent back to worker.`
-          );
-        }
+      if (filters.system && filters.system !== 'ALL') {
+        if (ctx.category?.code && ctx.category.code !== filters.system) continue;
+      }
+      if (filters.group && filters.group !== 'all') {
+        const gId = ctx.rule?.worker_group_id;
+        if (filters.group === 'unassigned' && gId) continue;
+        if (filters.group !== 'unassigned' && gId !== filters.group) continue;
       }
 
-      setSelectedApprovalIds((prev) => {
-        const next = new Set(prev);
-        logIds.forEach((id) => next.delete(id));
-        return next;
+      seenKeys.add(key);
+      enriched.push({
+        ...log,
+        ...ctx,
+        worker_group: ctx.workerGroup,
+        submitterName: ctx.worker?.full_name || 'Worker',
+        approverName: ctx.approver?.full_name || null,
       });
-      setRejectModalVisible(false);
-      setRejectReason('');
-      setRejectError('');
-
-      invalidateAllAfterReview();
-    } catch (err) {
-      toast.error(err.message || 'Failed to review task.');
-    } finally {
-      setReviewLoading(false);
     }
-  };
 
-  const confirmApproveSingle = (logId, equipmentName) => {
-    runAction({
-      confirm: {
-        title: 'Approve Task?',
-        message: `Approve maintenance for "${equipmentName || 'Equipment'}"? It will be marked as done and recorded.`,
-        confirmText: 'Approve',
-        cancelText: 'Cancel',
-        tone: 'default',
-        icon: 'checkmark-circle-outline',
-      },
-      action: async () => {
-        await handleReviewLogs([logId], 'approve');
-      },
-    });
-  };
+    return enriched;
+  }, [filteredTasks, logContexts, selectedDayStr, filters.system, filters.group]);
 
-  const openRejectModal = (logIds) => {
-    setRejectingLogIds(logIds);
-    setRejectReason('');
-    setRejectError('');
-    setRejectModalVisible(true);
-  };
-
-  const confirmBulkApprove = () => {
-    const ids = Array.from(selectedApprovalIds);
-    if (ids.length === 0) return;
-
-    runAction({
-      confirm: {
-        title: `Approve ${ids.length} Selected Tasks?`,
-        message: `Approve ${ids.length} maintenance submissions at once? They will be marked as done.`,
-        confirmText: `Approve (${ids.length})`,
-        cancelText: 'Cancel',
-        tone: 'default',
-        icon: 'checkmark-circle-outline',
-      },
-      action: async () => {
-        await handleReviewLogs(ids, 'approve');
-      },
-    });
-  };
-
-  const confirmApproveAll = () => {
-    const ids = approvalQueueItems.map((item) => item.id);
-    if (ids.length === 0) return;
-
-    runAction({
-      confirm: {
-        title: `Approve All ${ids.length} Waiting Tasks?`,
-        message: `Are you sure you want to approve all ${ids.length} submitted tasks across all dates?`,
-        confirmText: `Approve All (${ids.length})`,
-        cancelText: 'Cancel',
-        tone: 'default',
-        icon: 'checkmark-circle-outline',
-      },
-      action: async () => {
-        await handleReviewLogs(ids, 'approve');
-      },
-    });
-  };
-
-  const toggleApprovalSelect = (id) => {
-    setSelectedApprovalIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  // Filter by Assigned Group: 'ALL' | 'UNASSIGNED' | groupId
-  const [groupFilter, setGroupFilter] = useState('ALL');
-
-  // Navigate dates
-  const handlePrev = () => {
-    const d = parseDate(currentDateStr);
-    if (viewMode === 'month') {
-      d.setMonth(d.getMonth() - 1);
-    } else {
-      d.setDate(d.getDate() - 7);
+  // Apply search and status filter to selectedDayTasks
+  const searchFilteredTasks = useMemo(() => {
+    let list = selectedDayTasks;
+    const q = searchQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter((t) => {
+        const eqName = (t.equipment?.name || '').toLowerCase();
+        const grpName = (t.group?.name || t.equipment?.group?.name || '').toLowerCase();
+        const notes = (t.notes || t.log?.notes || '').toLowerCase();
+        return eqName.includes(q) || grpName.includes(q) || notes.includes(q);
+      });
     }
-    const newStr = formatDate(d);
-    setCurrentDateStr(newStr);
-    setSelectedDayStr(newStr);
-  };
 
-  const handleNext = () => {
-    const d = parseDate(currentDateStr);
-    if (viewMode === 'month') {
-      d.setMonth(d.getMonth() + 1);
-    } else {
-      d.setDate(d.getDate() + 7);
+    if (!filters.status || filters.status === 'all') return list;
+
+    return list.filter((t) => {
+      const log = t.log;
+      if (filters.status === 'pending') return !log || log.status === 'pending' || (!log.result && log.status === 'draft');
+      if (filters.status === 'completed') return log?.result === 'completed';
+      if (filters.status === 'issue') return log?.result === 'issue';
+      if (filters.status === 'submitted') return log?.status === 'submitted';
+      if (filters.status === 'done') return log?.status === 'done';
+      if (filters.status === 'returned') return log?.status === 'returned';
+      return true;
+    });
+  }, [selectedDayTasks, searchQuery, filters.status]);
+
+  // Group tasks by SYSTEM header, then by EQUIPMENT GROUP row
+  const systemGroupedTasks = useMemo(() => {
+    const systemsMap = new Map();
+    searchFilteredTasks.forEach((t) => {
+      const sysCode = t.category?.code || t.equipment?.group?.category?.code || 'OTHER';
+      const sysName = t.category?.name || t.equipment?.group?.category?.name || 'Other System';
+      const sysKey = `${sysCode} - ${sysName}`;
+
+      if (!systemsMap.has(sysKey)) {
+        systemsMap.set(sysKey, new Map());
+      }
+      const eqGroupsMap = systemsMap.get(sysKey);
+      const eqGroupName = t.group?.name || t.equipment?.group?.name || 'General Equipment';
+
+      if (!eqGroupsMap.has(eqGroupName)) {
+        eqGroupsMap.set(eqGroupName, []);
+      }
+      eqGroupsMap.get(eqGroupName).push(t);
+    });
+
+    const result = [];
+    systemsMap.forEach((eqGroupsMap, sysKey) => {
+      const groups = Array.from(eqGroupsMap.entries()).map(([grpName, units]) => {
+        const doneCount = units.filter((t) => {
+          const l = t.log;
+          return l && (l.status === 'draft' || l.status === 'submitted' || l.status === 'done');
+        }).length;
+        const issueCount = units.filter((t) => t.log?.result === 'issue').length;
+        const pendingCount = units.length - doneCount;
+
+        // Determine dominant worker group dot
+        const gIds = units.map((u) => u.rule?.worker_group_id || u.worker_group_id).filter(Boolean);
+        let groupInfo = null;
+        if (gIds.length > 0) {
+          const g = workerGroupsList.find((wg) => wg.id === gIds[0]);
+          if (g) groupInfo = { name: g.name, color: g.color || colors.primary };
+        }
+
+        return {
+          groupName: grpName,
+          units,
+          doneCount,
+          issueCount,
+          pendingCount,
+          groupInfo,
+        };
+      });
+      result.push({ systemName: sysKey, groups });
+    });
+
+    return result;
+  }, [searchFilteredTasks, workerGroupsList]);
+
+  // Flatten group rows for 10-per-page pagination
+  const allGroupRows = useMemo(() => {
+    const list = [];
+    systemGroupedTasks.forEach((sys) => {
+      sys.groups.forEach((grp) => {
+        list.push({ ...grp, systemName: sys.systemName });
+      });
+    });
+    return list;
+  }, [systemGroupedTasks]);
+
+  const paginatedGroupRows = useMemo(() => {
+    const start = (dayPanelPage - 1) * DAY_PAGE_SIZE;
+    return allGroupRows.slice(start, start + DAY_PAGE_SIZE);
+  }, [allGroupRows, dayPanelPage]);
+
+  // Reset pagination on filter or day change
+  useEffect(() => {
+    setDayPanelPage(1);
+    setReportsPage(1);
+  }, [filters, selectedDayStr, searchQuery]);
+
+  // Day KPI strip counts
+  const dayKpi = useMemo(() => {
+    let assigned = 0, completed = 0, pending = 0, issues = 0;
+    for (const t of selectedDayTasks) {
+      assigned++;
+      const log = t.log;
+      if (log?.result === 'issue') {
+        completed++;
+        issues++;
+      } else if (log && (log.status === 'draft' || log.status === 'submitted' || log.status === 'done')) {
+        completed++;
+      } else {
+        pending++;
+      }
     }
-    const newStr = formatDate(d);
-    setCurrentDateStr(newStr);
-    setSelectedDayStr(newStr);
+    return { assigned, completed, pending, issues };
+  }, [selectedDayTasks]);
+
+  // Build Reports View rows (worker groups x dates in reportsRange)
+  const reportRows = useMemo(() => {
+    const reportMap = new Map(
+      dailyReports.map((r) => [`${r.worker_group_id}_${r.report_date}`, r])
+    );
+    const allLogs = [...logs, ...reportsRangeLogs];
+    const logMap = new Map(
+      allLogs.map((l) => [`${l.rule_id}_${l.due_date}`, l])
+    );
+
+    // Compute dates list in reportsRange
+    const dStart = parseDate(reportsRange.start);
+    const dEnd = parseDate(reportsRange.end);
+    const dateList = [];
+    let cur = new Date(dStart);
+    while (cur <= dEnd) {
+      dateList.push(formatDate(cur));
+      cur = addDays(cur, 1);
+    }
+
+    const q = searchQuery.trim().toLowerCase();
+    const result = [];
+
+    for (const date of dateList) {
+      for (const wg of workerGroupsList) {
+        if (filters.group && filters.group !== 'all' && filters.group !== wg.id) {
+          continue;
+        }
+
+        const groupRules = rules.filter((r) => {
+          if (r.worker_group_id !== wg.id) return false;
+          if (filters.system && filters.system !== 'ALL') {
+            const code = r.equipment?.group?.category?.code || r.category?.code;
+            if (code && code !== filters.system) return false;
+          }
+          return expandRuleDueDates(r, date, date).length > 0;
+        });
+
+        if (groupRules.length === 0) continue;
+
+        if (q) {
+          const matchesSearch =
+            wg.name.toLowerCase().includes(q) ||
+            groupRules.some((r) => {
+              const eqName = (r.equipment?.name || '').toLowerCase();
+              const grpName = (r.equipment?.group?.name || '').toLowerCase();
+              return eqName.includes(q) || grpName.includes(q);
+            });
+          if (!matchesSearch) continue;
+        }
+
+        const rep = reportMap.get(`${wg.id}_${date}`) || null;
+        // Only APPROVED tasks (status 'done') count as completed.
+        // Recorded-but-unapproved tasks are shown separately as "to approve".
+        let completedCount = 0;
+        let waitingCount = 0;
+        let remainingCount = 0;
+        for (const r of groupRules) {
+          const l = logMap.get(`${r.id}_${date}`);
+          if (l && l.status === 'done') {
+            completedCount++;
+          } else if (l && (l.status === 'draft' || l.status === 'submitted' || l.status === 'rejected')) {
+            waitingCount++;
+          } else {
+            remainingCount++;
+          }
+        }
+
+        const repStatus = rep?.status || null;
+
+        // Apply reports status filter
+        if (filters.status && filters.status !== 'all') {
+          if (filters.status === 'submitted' && repStatus !== 'submitted') continue;
+          if (filters.status === 'reviewed' && repStatus !== 'reviewed') continue;
+          if (filters.status === 'returned' && repStatus !== 'returned') continue;
+          if (filters.status === 'draft' && repStatus !== 'draft') continue;
+          if (filters.status === 'none' && repStatus !== null) continue;
+        }
+
+        result.push({
+          key: `${wg.id}_${date}`,
+          groupId: wg.id,
+          groupName: wg.name,
+          groupColor: wg.color || colors.primary,
+          date,
+          submittedBy: rep?.submitted_by ? profilesMap.get(rep.submitted_by) || 'Worker' : '-',
+          completedCount,
+          remainingCount,
+          waitingCount,
+          status: repStatus,
+          reportId: rep?.id || null,
+        });
+      }
+    }
+
+    // Sort: "needs review" (submitted) first, then by date descending
+    result.sort((a, b) => {
+      if (a.status === 'submitted' && b.status !== 'submitted') return -1;
+      if (a.status !== 'submitted' && b.status === 'submitted') return 1;
+      return b.date.localeCompare(a.date);
+    });
+
+    return result;
+  }, [dailyReports, logs, reportsRangeLogs, reportsRange, rules, workerGroupsList, filters.group, filters.system, filters.status, searchQuery, profilesMap]);
+
+  // Reports needing review count in current table rows
+  const currentTableNeedsReviewCount = useMemo(() => {
+    return reportRows.filter((r) => r.status === 'submitted').length;
+  }, [reportRows]);
+
+  // Diff between global badge count and visible needs-review reports in table
+  const unshownNeedsReviewCount = Math.max(0, submittedReportsCount - currentTableNeedsReviewCount);
+
+  const handleShowAllNeedsReview = () => {
+    setFilters((prev) => ({
+      ...prev,
+      status: 'submitted',
+      range: 'week',
+    }));
   };
 
-  const handleToday = () => {
-    const today = formatDate(new Date());
-    setCurrentDateStr(today);
-    setSelectedDayStr(today);
+  const handleClearReportFilters = () => {
+    setFilters((prev) => ({
+      ...prev,
+      status: 'all',
+      group: 'all',
+      system: 'ALL',
+      range: 'day',
+    }));
+    setSearchQuery('');
   };
 
-  // Open edit rule
+  const paginatedReportRows = useMemo(() => {
+    const start = (reportsPage - 1) * REPORTS_PAGE_SIZE;
+    return reportRows.slice(start, start + REPORTS_PAGE_SIZE);
+  }, [reportRows, reportsPage]);
+
+  // Edit Rule Modal State
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editingRule, setEditingRule] = useState(null);
+  const [editFreq, setEditFreq] = useState('d');
+  const [editStartDate, setEditStartDate] = useState('');
+  const [editEndDate, setEditEndDate] = useState('');
+  const [editWeekday, setEditWeekday] = useState(1);
+  const [editNotes, setEditNotes] = useState('');
+  const [editGroupId, setEditGroupId] = useState(null);
+  const [modalSaving, setModalSaving] = useState(false);
+
   const openEditRule = (rule) => {
     setEditingRule(rule);
     setEditFreq(rule.frequency || 'd');
-    setEditStartDate(rule.start_date || '');
+    setEditStartDate(rule.start_date || selectedDayStr);
     setEditEndDate(rule.end_date || '');
-    setEditWeekday(rule.weekday ? Number(rule.weekday) : 1);
+    setEditWeekday(rule.weekday || 1);
     setEditNotes(rule.notes || '');
-
-    // Prefill assigned group from rule
     setEditGroupId(rule.worker_group_id || null);
     setEditModalVisible(true);
   };
 
-  const handleSaveEditRule = () => {
-    if (!editingRule) return;
-
-    const chosenGroup = workerGroupsList.find((g) => g.id === editGroupId);
-    const isUnassigning = !editGroupId;
-
-    runAction({
-      confirm: {
-        title: 'Save Schedule Rule?',
-        message: isUnassigning
-          ? 'Save changes with no worker group assigned? Nobody will see this task until it is assigned.'
-          : `Update schedule rule and assign to "${chosenGroup?.name || 'Worker Group'}"?`,
-        confirmText: 'Save Changes',
-        cancelText: 'Cancel',
-        tone: isUnassigning ? 'danger' : 'default',
-        icon: 'create-outline',
-      },
-      loading: 'Saving schedule rule...',
-      action: async () => {
-        // 1. Update rule basic fields
-        await updateScheduleRule(editingRule.id, {
-          frequency: editFreq,
-          start_date: editStartDate,
-          end_date: editEndDate.trim() ? editEndDate.trim() : null,
-          weekday: editFreq === 'w' ? editWeekday : null,
-          notes: editNotes.trim() ? editNotes.trim() : null,
+  const handleSaveEditRule = async () => {
+    if (!editingRule?.id) return;
+    setModalSaving(true);
+    try {
+      await updateScheduleRule(editingRule.id, {
+        frequency: editFreq,
+        start_date: editStartDate,
+        end_date: editEndDate.trim() ? editEndDate.trim() : null,
+        weekday: editFreq === 'w' ? editWeekday : null,
+        notes: editNotes.trim() ? editNotes.trim() : null,
+      });
+      if (isConfigured && supabase) {
+        await supabase.rpc('set_rules_group', {
+          p_rule_ids: [editingRule.id],
+          p_group_id: editGroupId || null,
         });
-
-        // 2. Update assigned worker group via set_rules_group RPC
-        if (isConfigured && supabase) {
-          const { error: groupErr } = await supabase.rpc('set_rules_group', {
-            p_rule_ids: [editingRule.id],
-            p_group_id: editGroupId || null,
-          });
-
-          if (groupErr) {
-            if (groupErr.code === '42883' || groupErr.code === 'PGRST202') {
-              throw new Error('Run the worker groups SQL in Supabase');
-            }
-            throw groupErr;
-          }
-        }
-      },
-      success: 'Schedule rule updated successfully',
-      onSuccess: () => {
-        setEditModalVisible(false);
-        queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
-        queryClient.invalidateQueries({ queryKey: ['schedule_rules_all'] });
-        queryClient.invalidateQueries({ queryKey: ['recent_schedule_rules'] });
-      },
-    });
+      }
+      toast.success('Schedule rule updated successfully');
+      setEditModalVisible(false);
+      refetchRules();
+    } catch (err) {
+      toast.error(mapError(err));
+    } finally {
+      setModalSaving(false);
+    }
   };
 
-  const handleDeleteRule = (ruleId) => {
+  const handleDeleteRule = async (ruleId) => {
+    if (!ruleId) return;
+    let totalLogs = 0;
+    try {
+      const counts = await countRuleTaskLogs(ruleId);
+      totalLogs = counts.total;
+    } catch (_) {}
+
     runAction({
       confirm: {
-        title: 'Delete this task?',
-        message: 'This schedule rule and all future recurrences will be removed. This cannot be undone.',
-        confirmText: 'Delete',
+        title: 'Delete Rule?',
+        message:
+          totalLogs > 0
+            ? `This schedule rule and ${totalLogs} associated task logs will be removed. This cannot be undone.`
+            : 'This schedule rule will be removed. This cannot be undone.',
+        confirmText: 'Delete Rule',
         cancelText: 'Cancel',
         tone: 'danger',
         icon: 'trash-outline',
@@ -455,32 +701,162 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
       },
       success: 'Schedule rule deleted successfully',
       onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
-        queryClient.invalidateQueries({ queryKey: ['schedule_rules_all'] });
+        setEditModalVisible(false);
+        setEditingRule(null);
+        invalidateAllAfterReview();
       },
     });
   };
 
-  // Filtered tasks across the entire calendar based on system filter and group filter
-  const filteredTasks = React.useMemo(() => {
-    if (groupFilter === 'ALL') return tasks;
-    return tasks.filter((t) => {
-      const gId = t.rule?.worker_group_id || t.worker_group_id;
-      if (groupFilter === 'UNASSIGNED') {
-        return !gId;
-      }
-      return gId === groupFilter;
+  const handleRemoveFromQueue = (item) => {
+    const logId = item?.log?.id || item?.id;
+    if (!logId) return;
+    runAction({
+      confirm: {
+        title: 'Remove from queue?',
+        message: 'Remove this submission from the approval queue?',
+        confirmText: 'Remove',
+        cancelText: 'Cancel',
+        tone: 'danger',
+        icon: 'trash-outline',
+      },
+      loading: 'Removing...',
+      action: async () => {
+        await deleteTaskLogById(logId);
+      },
+      success: 'Removed from queue',
+      onSuccess: invalidateAllAfterReview,
     });
-  }, [tasks, groupFilter]);
+  };
 
-  // Build Month Grid
+  const handleOpenReportSlideOver = (groupId, date, reportId = null) => {
+    setSlideOverReport({
+      visible: true,
+      groupId,
+      date,
+      reportId,
+    });
+    if (navigation?.setParams) {
+      navigation.setParams({ reportGroupId: groupId, reportDate: date, reportId });
+    }
+  };
+
+  const handleCloseReportSlideOver = () => {
+    setSlideOverReport({ visible: false, groupId: null, date: null, reportId: null });
+    if (navigation?.setParams) {
+      navigation.setParams({ reportGroupId: undefined, reportDate: undefined, reportId: undefined });
+    }
+    invalidateAllAfterReview();
+  };
+
+  // Filter sections for FilterButton
+  const taskFilterSections = useMemo(
+    () => [
+      {
+        key: 'status',
+        label: 'Status',
+        type: 'single',
+        options: [
+          { value: 'all', label: 'All' },
+          { value: 'pending', label: 'Pending' },
+          { value: 'completed', label: 'Completed' },
+          { value: 'issue', label: 'Issues' },
+          { value: 'submitted', label: 'In Report' },
+          { value: 'done', label: 'Done' },
+          { value: 'returned', label: 'Returned' },
+        ],
+      },
+      {
+        key: 'group',
+        label: 'Worker group',
+        type: 'single',
+        options: [
+          { value: 'all', label: 'All' },
+          { value: 'unassigned', label: 'Unassigned' },
+          ...workerGroupsList.map((g) => ({
+            value: g.id,
+            label: g.name,
+            dot: g.color || colors.primary,
+          })),
+        ],
+      },
+      {
+        key: 'system',
+        label: 'System',
+        type: 'single',
+        options: [
+          { value: 'ALL', label: 'All Systems' },
+          { value: 'A', label: 'A - Inverter Station Area' },
+          { value: 'B', label: 'B - PV Field Area' },
+          { value: 'C', label: 'C - MV & LV System' },
+          { value: 'D', label: 'D - Other System' },
+        ],
+      },
+    ],
+    [workerGroupsList]
+  );
+
+  const reportFilterSections = useMemo(
+    () => [
+      {
+        key: 'status',
+        label: 'Status',
+        type: 'single',
+        options: [
+          { value: 'all', label: 'All' },
+          { value: 'submitted', label: 'Needs Review' },
+          { value: 'reviewed', label: 'Reviewed' },
+          { value: 'returned', label: 'Returned' },
+          { value: 'draft', label: 'Draft' },
+          { value: 'none', label: 'Not reported' },
+        ],
+      },
+      {
+        key: 'group',
+        label: 'Worker group',
+        type: 'single',
+        options: [
+          { value: 'all', label: 'All' },
+          ...workerGroupsList.map((g) => ({
+            value: g.id,
+            label: g.name,
+            dot: g.color || colors.primary,
+          })),
+        ],
+      },
+      {
+        key: 'system',
+        label: 'System',
+        type: 'single',
+        options: [
+          { value: 'ALL', label: 'All Systems' },
+          { value: 'A', label: 'A - Inverter Station Area' },
+          { value: 'B', label: 'B - PV Field Area' },
+          { value: 'C', label: 'C - MV & LV System' },
+          { value: 'D', label: 'D - Other System' },
+        ],
+      },
+      {
+        key: 'range',
+        label: 'Date Range',
+        type: 'single',
+        options: [
+          { value: 'day', label: 'Selected day' },
+          { value: 'week', label: 'This week' },
+          { value: 'last7', label: 'Last 7 days' },
+        ],
+      },
+    ],
+    [workerGroupsList]
+  );
+
+  // Month Grid
   const renderMonthGrid = () => {
     const mRange = getMonthRange(currentDateStr);
     const d = parseDate(mRange.start);
-    const firstWeekday = getIsoWeekday(d); // 1=Mon ... 7=Sun
+    const firstWeekday = getIsoWeekday(d);
     const totalDays = daysInMonth(mRange.year, mRange.month);
 
-    // Map tasks by day using filteredTasks
     const tasksByDay = new Map();
     for (const t of filteredTasks) {
       if (!tasksByDay.has(t.due_date)) tasksByDay.set(t.due_date, []);
@@ -488,16 +864,12 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
     }
 
     const cells = [];
-    // Blank padding cells before 1st of month
     for (let i = 1; i < firstWeekday; i++) {
       cells.push({ isBlank: true, key: `blank-${i}` });
     }
-
-    // Actual month days
     for (let dayNum = 1; dayNum <= totalDays; dayNum++) {
       const dateStr = `${mRange.year}-${String(mRange.month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`;
       const dayTasks = tasksByDay.get(dateStr) || [];
-
       cells.push({
         isBlank: false,
         dateStr,
@@ -511,7 +883,6 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
 
     return (
       <View style={styles.calendarContainer}>
-        {/* Days of week header (Mon - Sun) */}
         <View style={styles.weekHeaderRow}>
           {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((dName) => (
             <View key={dName} style={styles.weekHeaderCell}>
@@ -519,8 +890,6 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
             </View>
           ))}
         </View>
-
-        {/* Days grid */}
         <View style={styles.gridRow}>
           {cells.map((cell) => {
             if (cell.isBlank) {
@@ -548,8 +917,6 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
                     {cell.dayNum}
                   </Text>
                 </View>
-
-                {/* Only task count line */}
                 <View style={styles.dayCellBody}>
                   <Text
                     style={[
@@ -569,7 +936,7 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
     );
   };
 
-  // Build Week View (Mon-Sun like Excel)
+  // Week View
   const renderWeekView = () => {
     const wInfo = getWorkWeek(currentDateStr);
     const tasksByDay = new Map();
@@ -619,7 +986,6 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
                     {day.dayNumber}
                   </Text>
                 </View>
-
                 <View style={styles.weekColBody}>
                   <Text
                     style={[
@@ -639,44 +1005,41 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
     );
   };
 
-  // Tasks for the selected day, using filteredTasks
-  const selectedDayTasks = filteredTasks.filter((t) => t.due_date === selectedDayStr);
+  const handlePrev = () => {
+    const d = parseDate(currentDateStr);
+    if (viewMode === 'month') {
+      d.setMonth(d.getMonth() - 1);
+    } else {
+      d.setDate(d.getDate() - 7);
+    }
+    const newStr = formatDate(d);
+    setCurrentDateStr(newStr);
+    setSelectedDayStr(newStr);
+  };
 
-  // Tab counts for selected day
-  const pendingDayTasks = useMemo(() => {
-    return selectedDayTasks.filter((t) => t.status === 'pending' || t.status === 'rejected');
-  }, [selectedDayTasks]);
+  const handleNext = () => {
+    const d = parseDate(currentDateStr);
+    if (viewMode === 'month') {
+      d.setMonth(d.getMonth() + 1);
+    } else {
+      d.setDate(d.getDate() + 7);
+    }
+    const newStr = formatDate(d);
+    setCurrentDateStr(newStr);
+    setSelectedDayStr(newStr);
+  };
 
-  const doneDayTasks = useMemo(() => {
-    return selectedDayTasks.filter((t) => t.status === 'done');
-  }, [selectedDayTasks]);
+  const handleToday = () => {
+    const today = formatDate(new Date());
+    setCurrentDateStr(today);
+    setSelectedDayStr(today);
+  };
 
-  const issuesDayTasks = useMemo(() => {
-    return selectedDayTasks.filter((t) => t.status === 'issue' || t.status === 'skipped');
-  }, [selectedDayTasks]);
-
-  // Active list based on activeTab
-  const activeTabList = useMemo(() => {
-    if (activeTab === 'approval') return approvalQueueItems;
-    if (activeTab === 'done') return doneDayTasks;
-    if (activeTab === 'issues') return issuesDayTasks;
-    return pendingDayTasks;
-  }, [activeTab, approvalQueueItems, doneDayTasks, issuesDayTasks, pendingDayTasks]);
-
-  // Reset page when tab, day or filter changes
-  useEffect(() => {
-    setTabTaskPage(1);
-  }, [activeTab, selectedDayStr, selectedSystem, groupFilter]);
-
-  // Paginated tab list
-  const paginatedTabTasks = useMemo(() => {
-    const start = (tabTaskPage - 1) * TAB_PAGE_SIZE;
-    return activeTabList.slice(start, start + TAB_PAGE_SIZE);
-  }, [activeTabList, tabTaskPage]);
-
+  const isTasksView = filters.view !== 'reports';
   const weekNum = getWorkWeekNumber(currentDateStr);
   const monthInfo = getMonthRange(currentDateStr);
-  const todayLocalStr = formatDate(new Date());
+  const loading = rulesLoading || logsLoading;
+  const error = rulesError?.message || logsError?.message || '';
 
   return (
     <View style={styles.screen}>
@@ -686,7 +1049,7 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
         navigation={navigation}
         rightAction={
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            {Platform.OS === 'web' && user?.role === 'admin' && (
+            {Platform.OS === 'web' && isAdmin && (
               <TouchableOpacity
                 style={styles.exportExcelBtn}
                 onPress={() => setExportModalVisible(true)}
@@ -709,34 +1072,37 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
       />
 
       <PageContainer>
-        {/* Inline Error Banner */}
+        {/* Error Banner */}
         {error ? (
           <View style={styles.errorBanner}>
             <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1, gap: 8 }}>
               <Ionicons name="alert-circle" size={20} color="#DC2626" />
               <Text style={styles.errorBannerText}>{error}</Text>
             </View>
-            <TouchableOpacity style={styles.retryBtn} onPress={loadData}>
+            <TouchableOpacity
+              style={styles.retryBtn}
+              onPress={() => {
+                refetchRules();
+                refetchLogs();
+              }}
+            >
               <Text style={styles.retryBtnText}>Retry</Text>
             </TouchableOpacity>
           </View>
         ) : null}
 
-        {/* Navigation & Controls Bar */}
+        {/* Date Navigation Strip */}
         <View style={styles.controlsBar}>
           <View style={styles.navButtonGroup}>
             <TouchableOpacity style={styles.iconNavBtn} onPress={handlePrev}>
               <Ionicons name="chevron-back" size={20} color={colors.dark} />
             </TouchableOpacity>
-
             <TouchableOpacity style={styles.todayBtn} onPress={handleToday}>
               <Text style={styles.todayBtnText}>Today</Text>
             </TouchableOpacity>
-
             <TouchableOpacity style={styles.iconNavBtn} onPress={handleNext}>
               <Ionicons name="chevron-forward" size={20} color={colors.dark} />
             </TouchableOpacity>
-
             <Text style={styles.currentRangeTitle}>
               {viewMode === 'month'
                 ? `${monthInfo.monthName} ${monthInfo.year}`
@@ -744,7 +1110,6 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
             </Text>
           </View>
 
-          {/* Toggle Week / Month */}
           <View style={styles.toggleGroup}>
             <TouchableOpacity
               style={[styles.toggleBtn, viewMode === 'week' && styles.toggleBtnActive]}
@@ -765,7 +1130,7 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
           </View>
         </View>
 
-        {/* Calendar View */}
+        {/* Calendar Days Strip */}
         {loading ? (
           <ActivityIndicator size="large" color={colors.primary} style={{ marginVertical: 32 }} />
         ) : viewMode === 'month' ? (
@@ -774,283 +1139,341 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
           renderWeekView()
         )}
 
-        {/* TAB STRIP: Pending (n) | For approval (n) | Done (n) | Issues / Skipped (n) */}
-        <View style={styles.tabStrip}>
-          <TouchableOpacity
-            style={[styles.tabItem, activeTab === 'pending' && styles.tabItemActive]}
-            onPress={() => setActiveTab('pending')}
-          >
-            <Text style={[styles.tabText, activeTab === 'pending' && styles.tabTextActive]}>
-              Pending ({pendingDayTasks.length})
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.tabItem,
-              activeTab === 'approval' && styles.tabItemActive,
-              approvalQueueCount > 0 && styles.tabItemHighlight,
-            ]}
-            onPress={() => setActiveTab('approval')}
-          >
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-              <Text style={[styles.tabText, activeTab === 'approval' && styles.tabTextActive]}>
-                For approval ({approvalQueueCount})
+        {/* Compact Single Toolbar Row */}
+        <View style={styles.unifiedToolbar}>
+          {/* Segmented Toggle: Tasks | Reports */}
+          <View style={styles.segmentedToggle}>
+            <TouchableOpacity
+              style={[styles.segmentBtn, isTasksView && styles.segmentBtnActive]}
+              onPress={() => setFilters((prev) => ({ ...prev, view: 'tasks' }))}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.segmentBtnText, isTasksView && styles.segmentBtnTextActive]}>
+                Tasks
               </Text>
-              {approvalQueueCount > 0 && (
-                <View style={styles.approvalBadgeMini}>
-                  <Text style={styles.approvalBadgeMiniText}>
-                    {approvalQueueCount > 99 ? '99+' : approvalQueueCount}
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[styles.segmentBtn, !isTasksView && styles.segmentBtnActive]}
+              onPress={() => setFilters((prev) => ({ ...prev, view: 'reports' }))}
+              activeOpacity={0.8}
+            >
+              <Text style={[styles.segmentBtnText, !isTasksView && styles.segmentBtnTextActive]}>
+                Reports
+              </Text>
+              {submittedReportsCount > 0 && (
+                <View style={styles.segmentBadge}>
+                  <Text style={styles.segmentBadgeText}>
+                    {submittedReportsCount > 99 ? '99+' : submittedReportsCount}
                   </Text>
                 </View>
               )}
-            </View>
-          </TouchableOpacity>
+            </TouchableOpacity>
+          </View>
 
-          <TouchableOpacity
-            style={[styles.tabItem, activeTab === 'done' && styles.tabItemActive]}
-            onPress={() => setActiveTab('done')}
-          >
-            <Text style={[styles.tabText, activeTab === 'done' && styles.tabTextActive]}>
-              Done ({doneDayTasks.length})
-            </Text>
-          </TouchableOpacity>
+          {/* Search Box */}
+          <View style={styles.searchBox}>
+            <Ionicons name="search-outline" size={16} color={colors.textMuted} />
+            <TextInput
+              style={styles.searchInput}
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              placeholder="Search equipment or activity..."
+              placeholderTextColor={colors.textMuted}
+            />
+            {searchQuery ? (
+              <TouchableOpacity onPress={() => setSearchQuery('')}>
+                <Ionicons name="close-circle" size={16} color={colors.textMuted} />
+              </TouchableOpacity>
+            ) : null}
+          </View>
 
-          <TouchableOpacity
-            style={[styles.tabItem, activeTab === 'issues' && styles.tabItemActive]}
-            onPress={() => setActiveTab('issues')}
-          >
-            <Text style={[styles.tabText, activeTab === 'issues' && styles.tabTextActive]}>
-              Issues / Skipped ({issuesDayTasks.length})
-            </Text>
-          </TouchableOpacity>
+          {/* Filter Button */}
+          <FilterButton
+            sections={isTasksView ? taskFilterSections : reportFilterSections}
+            value={filters}
+            onChange={setFilters}
+            resultCount={isTasksView ? searchFilteredTasks.length : reportRows.length}
+          />
         </View>
 
-        {/* Tasks Section */}
-        <View style={styles.dayTasksSection}>
-          <View style={styles.dayTasksHeader}>
-            <View>
-              <Text style={styles.dayTasksHeading}>
-                {activeTab === 'approval'
-                  ? 'All Pending Task Approvals (Queue)'
-                  : `Tasks Scheduled for ${selectedDayStr}`}
-              </Text>
-              <Text style={styles.dayTasksSub}>
-                {activeTabList.length} {activeTabList.length === 1 ? 'task' : 'tasks'}
+        {/* ================= TASKS VIEW ================= */}
+        {isTasksView ? (
+          <View style={styles.tasksViewContainer}>
+            {/* Compact Heading with small muted task count */}
+            <View style={styles.smallHeadingRow}>
+              <Text style={styles.smallHeadingText}>Tasks for {selectedDayStr}</Text>
+              <Text style={styles.smallHeadingCount}>
+                {searchFilteredTasks.length} {searchFilteredTasks.length === 1 ? 'task' : 'tasks'}
               </Text>
             </View>
 
-            {/* If in 'approval' tab, show bulk approve controls */}
-            {activeTab === 'approval' ? (
-              <View style={styles.approvalActionRow}>
-                {selectedApprovalIds.size > 0 && (
-                  <TouchableOpacity
-                    style={[styles.bulkApproveBtn, { backgroundColor: '#0EA5E9' }]}
-                    onPress={confirmBulkApprove}
-                  >
-                    <Ionicons name="checkmark-done" size={16} color={colors.white} />
-                    <Text style={styles.bulkApproveText}>
-                      Approve selected ({selectedApprovalIds.size})
-                    </Text>
-                  </TouchableOpacity>
-                )}
-                {approvalQueueItems.length > 0 && (
-                  <TouchableOpacity
-                    style={[styles.bulkApproveBtn, { backgroundColor: '#0284C7' }]}
-                    onPress={confirmApproveAll}
-                  >
-                    <Ionicons name="checkmark-circle" size={16} color={colors.white} />
-                    <Text style={styles.bulkApproveText}>Approve all ({approvalQueueItems.length})</Text>
-                  </TouchableOpacity>
-                )}
+            {/* Compact KPI Line */}
+            <View style={styles.compactKpiLine}>
+              <View style={styles.compactKpiItem}>
+                <Text style={styles.compactKpiVal}>{dayKpi.assigned}</Text>
+                <Text style={styles.compactKpiLabel}>Assigned</Text>
+              </View>
+              <View style={styles.kpiDivider} />
+              <View style={styles.compactKpiItem}>
+                <Text style={[styles.compactKpiVal, { color: colors.primaryDark }]}>
+                  {dayKpi.completed}
+                </Text>
+                <Text style={styles.compactKpiLabel}>Completed</Text>
+              </View>
+              <View style={styles.kpiDivider} />
+              <View style={styles.compactKpiItem}>
+                <Text style={styles.compactKpiVal}>{dayKpi.pending}</Text>
+                <Text style={styles.compactKpiLabel}>Pending</Text>
+              </View>
+              <View style={styles.kpiDivider} />
+              <View style={styles.compactKpiItem}>
+                <Text style={[styles.compactKpiVal, { color: '#B45309' }]}>{dayKpi.issues}</Text>
+                <Text style={styles.compactKpiLabel}>Issues</Text>
+              </View>
+            </View>
+
+            {/* Collapsed Equipment Groups */}
+            {searchFilteredTasks.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Ionicons name="calendar-clear-outline" size={32} color={colors.textMuted} />
+                <Text style={styles.emptyCardText}>
+                  No tasks found for {selectedDayStr} matching active filters.
+                </Text>
               </View>
             ) : (
-              /* Group filter pills for day tabs */
-              <View style={styles.assigneeFilterBar}>
-                <Text style={styles.assigneeFilterLabel}>Worker Group:</Text>
-                <TouchableOpacity
-                  style={[
-                    styles.assigneeFilterPill,
-                    groupFilter === 'ALL' && styles.assigneeFilterPillActive,
-                  ]}
-                  onPress={() => setGroupFilter('ALL')}
-                >
-                  <Text
-                    style={[
-                      styles.assigneeFilterText,
-                      groupFilter === 'ALL' && styles.assigneeFilterTextActive,
-                    ]}
-                  >
-                    All
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[
-                    styles.assigneeFilterPill,
-                    groupFilter === 'UNASSIGNED' && styles.assigneeFilterPillActive,
-                  ]}
-                  onPress={() => setGroupFilter('UNASSIGNED')}
-                >
-                  <Text
-                    style={[
-                      styles.assigneeFilterText,
-                      groupFilter === 'UNASSIGNED' && styles.assigneeFilterTextActive,
-                    ]}
-                  >
-                    Unassigned
-                  </Text>
-                </TouchableOpacity>
-                {workerGroupsList.map((g) => {
-                  const isSelected = groupFilter === g.id;
+              <View style={styles.groupsContainer}>
+                {paginatedGroupRows.map((grpRow) => {
+                  const isExpanded = expandedDayGroups[grpRow.groupName] === true;
+                  const hasIssue = grpRow.issueCount > 0;
+                  const allDone = grpRow.doneCount === grpRow.units.length && grpRow.units.length > 0;
+
                   return (
-                    <TouchableOpacity
-                      key={g.id}
-                      style={[
-                        styles.assigneeFilterPill,
-                        isSelected && styles.assigneeFilterPillActive,
-                      ]}
-                      onPress={() => setGroupFilter(g.id)}
-                    >
-                      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
-                        <View style={[styles.filterGroupDot, { backgroundColor: g.color || colors.primary }]} />
-                        <Text
-                          style={[
-                            styles.assigneeFilterText,
-                            isSelected && styles.assigneeFilterTextActive,
-                          ]}
-                        >
-                          {g.name}
-                        </Text>
-                      </View>
-                    </TouchableOpacity>
+                    <View key={grpRow.groupName} style={styles.declutteredGroupCard}>
+                      {/* Short 2-line group row */}
+                      <TouchableOpacity
+                        style={styles.groupCardHeader}
+                        onPress={() =>
+                          setExpandedDayGroups((prev) => ({
+                            ...prev,
+                            [grpRow.groupName]: !prev[grpRow.groupName],
+                          }))
+                        }
+                        activeOpacity={0.8}
+                        {...a11yRole('button')}
+                      >
+                        <View style={styles.groupCardHeaderLeft}>
+                          <Ionicons
+                            name={hasIssue ? 'warning' : allDone ? 'checkmark-circle' : 'time-outline'}
+                            size={18}
+                            color={hasIssue ? '#D97706' : allDone ? colors.primary : colors.textMuted}
+                          />
+                          <View style={{ flex: 1, gap: 2 }}>
+                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                              <Text style={styles.groupCardName}>{grpRow.groupName}</Text>
+                              {grpRow.groupInfo ? (
+                                <View
+                                  style={[styles.workerGroupDot, { backgroundColor: grpRow.groupInfo.color }]}
+                                  title={grpRow.groupInfo.name}
+                                />
+                              ) : null}
+                            </View>
+                            <Text style={styles.groupCardSummary}>
+                              {grpRow.units.length} units · {grpRow.doneCount} done
+                              {grpRow.issueCount > 0 ? ` · ${grpRow.issueCount} issue` : ''}
+                              {grpRow.pendingCount > 0 ? ` · ${grpRow.pendingCount} pending` : ''}
+                            </Text>
+                          </View>
+                        </View>
+
+                        <Ionicons
+                          name={isExpanded ? 'chevron-down' : 'chevron-forward'}
+                          size={18}
+                          color={colors.textSecondary}
+                        />
+                      </TouchableOpacity>
+
+                      {/* Expanded Unit Rows */}
+                      {isExpanded && (
+                        <View style={styles.expandedUnitsArea}>
+                          {grpRow.units.map((u) => (
+                            <TaskLogCard
+                              key={u.id}
+                              item={u}
+                              tab="pending"
+                              onEditRule={(rule) => openEditRule(rule)}
+                              onOpenReport={(item) =>
+                                handleOpenReportSlideOver(
+                                  item.rule?.worker_group_id || item.worker_group_id,
+                                  item.due_date || selectedDayStr
+                                )
+                              }
+                              onRemoveFromQueue={handleRemoveFromQueue}
+                              onRetry={() => {
+                                refetchRules();
+                                refetchLogs();
+                              }}
+                              profilesMap={profilesMap}
+                            />
+                          ))}
+                        </View>
+                      )}
+                    </View>
                   );
                 })}
+
+                {allGroupRows.length > DAY_PAGE_SIZE && (
+                  <View style={{ marginTop: 12, marginBottom: 16 }}>
+                    <Pagination
+                      currentPage={dayPanelPage}
+                      totalItems={allGroupRows.length}
+                      pageSize={DAY_PAGE_SIZE}
+                      onPageChange={setDayPanelPage}
+                    />
+                  </View>
+                )}
               </View>
             )}
           </View>
-
-          {/* List Content */}
-          {activeTabList.length === 0 ? (
-            <View style={styles.emptyDayBox}>
-              <Ionicons
-                name={activeTab === 'approval' ? 'checkmark-done-circle-outline' : 'calendar-clear-outline'}
-                size={36}
-                color={colors.textMuted}
-              />
-              <Text style={styles.emptyDayText}>
-                {activeTab === 'approval'
-                  ? 'No tasks waiting for approval.'
-                  : activeTab === 'done'
-                  ? `No tasks completed and approved for ${selectedDayStr}.`
-                  : activeTab === 'issues'
-                  ? `No issues or skipped tasks for ${selectedDayStr}.`
-                  : `No pending tasks scheduled for ${selectedDayStr}.`}
-              </Text>
-            </View>
-          ) : (
-            <>
-              {paginatedTabTasks.map((t) => {
-                const isSelected = activeTab === 'approval' && selectedApprovalIds.has(t.id);
-                return (
-                  <TaskLogCard
-                    key={t.id}
-                    item={t}
-                    tab={activeTab}
-                    isSelected={isSelected}
-                    onToggleSelect={toggleApprovalSelect}
-                    onApprove={(id, name) => confirmApproveSingle(id, name)}
-                    onReject={(item) => openRejectModal([item.id])}
-                    onEditRule={(rule) => openEditRule(rule)}
-                    profilesMap={profilesMap}
-                  />
-                );
-              })}
-
-              {/* 10 per page pagination */}
-              {activeTabList.length > TAB_PAGE_SIZE && (
-                <View style={{ marginTop: 12, marginBottom: 16 }}>
-                  <Pagination
-                    currentPage={tabTaskPage}
-                    totalItems={activeTabList.length}
-                    pageSize={TAB_PAGE_SIZE}
-                    onPageChange={setTabTaskPage}
-                  />
+        ) : (
+          /* ================= REPORTS VIEW ================= */
+          <View style={styles.reportsCard}>
+            {/* Slim Amber Info Banner when badge count > visible table needs review count */}
+            {unshownNeedsReviewCount > 0 && (
+              <View style={styles.reportsInfoBanner}>
+                <View style={styles.reportsInfoBannerLeft}>
+                  <Ionicons name="alert-circle-outline" size={16} color="#B45309" />
+                  <Text style={styles.reportsInfoBannerText}>
+                    {unshownNeedsReviewCount} {unshownNeedsReviewCount === 1 ? 'report needs' : 'reports need'} review on other days
+                  </Text>
                 </View>
-              )}
-            </>
-          )}
-        </View>
-
-        {/* REJECT MODAL WITH REQUIRED REASON */}
-        <Modal
-          visible={rejectModalVisible}
-          transparent
-          animationType="fade"
-          onRequestClose={() => setRejectModalVisible(false)}
-        >
-          <View style={styles.modalOverlay}>
-            <View style={styles.modalContent}>
-              <View style={styles.modalHeader}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-                  <Ionicons name="close-circle" size={22} color="#DC2626" />
-                  <Text style={styles.modalTitle}>Reject Task Submission</Text>
-                </View>
-                <TouchableOpacity onPress={() => setRejectModalVisible(false)}>
-                  <Ionicons name="close" size={22} color={colors.dark} />
+                <TouchableOpacity
+                  onPress={handleShowAllNeedsReview}
+                  style={styles.reportsInfoBannerBtn}
+                  activeOpacity={0.8}
+                  {...a11yRole('button')}
+                >
+                  <Text style={styles.reportsInfoBannerBtnText}>Show</Text>
                 </TouchableOpacity>
               </View>
+            )}
 
-              <Text style={styles.rejectModalDesc}>
-                Please state the reason for rejecting this maintenance task. The worker will be required to redo and resubmit.
-              </Text>
-
-              <Text style={styles.modalFieldLabel}>Reason for Rejection *</Text>
-              <TextInput
-                style={[styles.modalInput, { minHeight: 90, textAlignVertical: 'top' }]}
-                value={rejectReason}
-                onChangeText={(txt) => {
-                  setRejectReason(txt);
-                  if (rejectError) setRejectError('');
-                }}
-                placeholder="E.g. Torque check incomplete, filter cleaning was skipped..."
-                placeholderTextColor="#A1A1AA"
-                multiline
-              />
-              {rejectError ? <Text style={styles.rejectErrorText}>{rejectError}</Text> : null}
-
-              <View style={styles.modalBtnRow}>
+            {dailyReportsLoading ? (
+              <ActivityIndicator size="large" color={colors.primary} style={{ marginVertical: 32 }} />
+            ) : paginatedReportRows.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Ionicons name="document-text-outline" size={32} color={colors.textMuted} />
+                <Text style={styles.emptyCardText}>
+                  No reports for this selection
+                </Text>
                 <TouchableOpacity
-                  style={styles.modalCancelBtn}
-                  onPress={() => setRejectModalVisible(false)}
-                  disabled={reviewLoading}
+                  onPress={handleClearReportFilters}
+                  style={styles.clearFiltersBtn}
+                  activeOpacity={0.8}
+                  {...a11yRole('button')}
                 >
-                  <Text style={styles.modalCancelText}>Cancel</Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                  style={[styles.modalSaveBtn, { backgroundColor: '#DC2626' }]}
-                  onPress={() => handleReviewLogs(rejectingLogIds, 'reject', rejectReason)}
-                  disabled={reviewLoading}
-                >
-                  {reviewLoading ? (
-                    <ActivityIndicator color={colors.white} size="small" />
-                  ) : (
-                    <Text style={styles.modalSaveText}>Confirm Rejection</Text>
-                  )}
+                  <Text style={styles.clearFiltersBtnText}>Clear filters</Text>
                 </TouchableOpacity>
               </View>
-            </View>
-          </View>
-        </Modal>
+            ) : (
+              <>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={true}
+                  style={styles.tableScrollWrapper}
+                  contentContainerStyle={styles.tableScrollContent}
+                >
+                  <View style={styles.table}>
+                    <View style={styles.tableHeader}>
+                      <Text style={[styles.th, styles.colGroup]} numberOfLines={1}>WORKER GROUP</Text>
+                      <Text style={[styles.th, styles.colPerson]} numberOfLines={1}>SUBMITTED BY</Text>
+                      <Text style={[styles.th, styles.colDate]} numberOfLines={1}>REPORTING DATE</Text>
+                      <Text style={[styles.th, styles.colNum]} numberOfLines={1}>TASKS COMPLETED</Text>
+                      <Text style={[styles.th, styles.colNum]} numberOfLines={1}>TASKS REMAINING</Text>
+                      <Text style={[styles.th, styles.colStatus]} numberOfLines={1}>REPORT STATUS</Text>
+                      <Text style={[styles.th, styles.colAction]} numberOfLines={1}>ACTION</Text>
+                    </View>
 
-        {/* Dev Diagnostics Line */}
-        {__DEV__ && (
-          <View style={styles.devDiagnosticsBar}>
-            <Text style={styles.devDiagnosticsText}>
-              [DEV DIAGNOSTICS] Rules: {rules.length} | Active Equipment with Rules: {new Set(rules.map((r) => r.equipment_id)).size} | Role: {user?.role || 'none'} | Date: {selectedDayStr}
-            </Text>
+                    {paginatedReportRows.map((row) => {
+                      const pill = getStatusPill(row.status);
+                      const needsReview = row.status === 'submitted';
+                      return (
+                        <View key={row.key} style={styles.tableRow}>
+                          <View style={[styles.td, styles.colGroup, styles.groupCell]}>
+                            <View style={[styles.dot, { backgroundColor: row.groupColor }]} />
+                            <Text style={styles.groupName} numberOfLines={1}>{row.groupName}</Text>
+                          </View>
+                          <Text style={[styles.td, styles.colPerson]} numberOfLines={1}>{row.submittedBy}</Text>
+                          <Text style={[styles.td, styles.colDate]} numberOfLines={1}>{row.date}</Text>
+                          <View style={[styles.td, styles.colNum]}>
+                            <Text style={styles.boldNum}>{row.completedCount}</Text>
+                            {row.waitingCount > 0 ? (
+                              <Text style={styles.waitingNum}>+{row.waitingCount} to approve</Text>
+                            ) : null}
+                          </View>
+                          <Text style={[styles.td, styles.colNum]}>{row.remainingCount}</Text>
+                          <View style={[styles.td, styles.colStatus]}>
+                            {pill ? (
+                              <View style={[styles.statusPill, { backgroundColor: pill.bg }]}>
+                                <View style={[styles.pillDot, { backgroundColor: pill.dot }]} />
+                                <Text style={[styles.statusPillText, { color: pill.text }]} numberOfLines={1}>
+                                  {pill.label}
+                                </Text>
+                              </View>
+                            ) : (
+                              <Text style={styles.dashText}>-</Text>
+                            )}
+                          </View>
+                          <View style={[styles.td, styles.colAction]}>
+                            {needsReview ? (
+                              <TouchableOpacity
+                                style={styles.viewBtnOutlined}
+                                onPress={() => handleOpenReportSlideOver(row.groupId, row.date, row.reportId)}
+                                activeOpacity={0.8}
+                                {...a11yRole('button')}
+                              >
+                                <Text style={styles.viewBtnOutlinedText}>View Report</Text>
+                              </TouchableOpacity>
+                            ) : (
+                              <TouchableOpacity
+                                onPress={() => handleOpenReportSlideOver(row.groupId, row.date, row.reportId)}
+                                activeOpacity={0.7}
+                                style={styles.plainLinkWrapper}
+                                {...a11yRole('button')}
+                              >
+                                <Text style={styles.plainLinkText}>View Report</Text>
+                              </TouchableOpacity>
+                            )}
+                          </View>
+                        </View>
+                      );
+                    })}
+                  </View>
+                </ScrollView>
+
+                {reportRows.length > REPORTS_PAGE_SIZE && (
+                  <View style={{ marginTop: 16 }}>
+                    <Pagination
+                      currentPage={reportsPage}
+                      totalItems={reportRows.length}
+                      pageSize={REPORTS_PAGE_SIZE}
+                      onPageChange={setReportsPage}
+                    />
+                  </View>
+                )}
+              </>
+            )}
           </View>
         )}
+
+        {/* Slide-over Report Detail Panel */}
+        <ReportDetailSlideOver
+          visible={slideOverReport.visible}
+          onClose={handleCloseReportSlideOver}
+          groupId={slideOverReport.groupId}
+          date={slideOverReport.date}
+          reportId={slideOverReport.reportId}
+        />
 
         {/* Edit Rule Modal */}
         <Modal
@@ -1128,9 +1551,7 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
                   placeholder="Optional"
                 />
 
-                <Text style={[styles.modalFieldLabel, { marginTop: 12 }]}>
-                  Notes
-                </Text>
+                <Text style={[styles.modalFieldLabel, { marginTop: 12 }]}>Notes</Text>
                 <TextInput
                   style={[styles.modalInput, { minHeight: 60 }]}
                   value={editNotes}
@@ -1138,7 +1559,6 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
                   multiline
                 />
 
-                {/* Worker Group assignment in Edit Rule modal */}
                 <Text style={[styles.modalFieldLabel, { marginTop: 16 }]}>
                   Assign to Worker Group
                 </Text>
@@ -1149,25 +1569,47 @@ export default function ScheduleCalendarScreen({ navigation, route }) {
                   disabled={modalSaving}
                 />
 
-                <View style={styles.modalBtnRow}>
-                  <TouchableOpacity
-                    style={styles.modalCancelBtn}
-                    onPress={() => setEditModalVisible(false)}
-                  >
-                    <Text style={styles.modalCancelText}>Cancel</Text>
-                  </TouchableOpacity>
+                <View style={styles.modalBtnRowSplit}>
+                  {editingRule?.id ? (
+                    <TouchableOpacity
+                      style={styles.modalDeleteBtn}
+                      onPress={() => {
+                        const targetRuleId = editingRule.id;
+                        setEditModalVisible(false);
+                        handleDeleteRule(targetRuleId);
+                      }}
+                      disabled={modalSaving}
+                      {...a11yRole('button')}
+                    >
+                      <Ionicons name="trash-outline" size={16} color="#DC2626" />
+                      <Text style={styles.modalDeleteText}>Delete Rule</Text>
+                    </TouchableOpacity>
+                  ) : (
+                    <View />
+                  )}
 
-                  <TouchableOpacity
-                    style={styles.modalSaveBtn}
-                    onPress={handleSaveEditRule}
-                    disabled={modalSaving}
-                  >
-                    {modalSaving ? (
-                      <ActivityIndicator color={colors.white} size="small" />
-                    ) : (
-                      <Text style={styles.modalSaveText}>Save Changes</Text>
-                    )}
-                  </TouchableOpacity>
+                  <View style={styles.modalBtnRight}>
+                    <TouchableOpacity
+                      style={styles.modalCancelBtn}
+                      onPress={() => setEditModalVisible(false)}
+                      {...a11yRole('button')}
+                    >
+                      <Text style={styles.modalCancelText}>Cancel</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={styles.modalSaveBtn}
+                      onPress={handleSaveEditRule}
+                      disabled={modalSaving}
+                      {...a11yRole('button')}
+                    >
+                      {modalSaving ? (
+                        <ActivityIndicator color={colors.white} size="small" />
+                      ) : (
+                        <Text style={styles.modalSaveText}>Save Changes</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
                 </View>
               </ScrollView>
             </View>
@@ -1203,10 +1645,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.background,
   },
-  content: {
-    paddingBottom: 40,
-    width: '100%',
-  },
   errorBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1235,20 +1673,6 @@ const styles = StyleSheet.create({
     color: colors.white,
     fontSize: 12,
     fontWeight: '700',
-  },
-  devDiagnosticsBar: {
-    marginTop: 20,
-    padding: 10,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#CBD5E1',
-    alignItems: 'center',
-  },
-  devDiagnosticsText: {
-    fontSize: 11,
-    color: '#475569',
-    fontFamily: Platform.OS === 'web' ? 'monospace' : undefined,
   },
   exportExcelBtn: {
     flexDirection: 'row',
@@ -1421,17 +1845,15 @@ const styles = StyleSheet.create({
   },
   dayCellCountText: {
     fontSize: 11,
-    fontWeight: '700',
+    fontWeight: '600',
     color: colors.dark,
-    textAlign: 'center',
   },
   dayCellCountMuted: {
     color: colors.textMuted,
-    fontWeight: '600',
   },
   dayCellCountSelected: {
     color: colors.primaryDark,
-    fontWeight: '800',
+    fontWeight: '700',
   },
   weekViewContainer: {
     marginBottom: 16,
@@ -1439,360 +1861,432 @@ const styles = StyleSheet.create({
   weekCardsRow: {
     flexDirection: 'row',
     gap: 8,
-    flexWrap: 'wrap',
   },
   weekColumnCard: {
     flex: 1,
-    minWidth: 110,
     backgroundColor: colors.white,
-    borderRadius: 12,
     borderWidth: 1,
     borderColor: colors.border,
+    borderRadius: 10,
     overflow: 'hidden',
   },
   weekColumnCardSelected: {
     borderColor: colors.primary,
-    borderWidth: 2,
+    backgroundColor: colors.primaryVeryLight,
   },
   weekColumnCardToday: {
+    borderWidth: 1.5,
     borderColor: colors.primaryDark,
   },
   weekColHeader: {
-    backgroundColor: colors.background,
     paddingVertical: 8,
     alignItems: 'center',
+    backgroundColor: colors.background,
     borderBottomWidth: 1,
     borderBottomColor: colors.border,
   },
   weekColHeaderSelected: {
-    backgroundColor: colors.primary,
+    backgroundColor: '#E0F2FE',
   },
   weekColShort: {
     fontSize: 11,
     fontWeight: '700',
     color: colors.textSecondary,
+    textTransform: 'uppercase',
   },
   weekColShortSelected: {
-    color: colors.white,
+    color: colors.primaryDark,
   },
   weekColDayNum: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '800',
     color: colors.dark,
+    marginTop: 2,
   },
   weekColDayNumSelected: {
-    color: colors.white,
+    color: colors.primaryDark,
   },
   weekColBody: {
-    padding: 12,
+    paddingVertical: 10,
     alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 64,
   },
   weekTaskCountText: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '600',
     color: colors.dark,
-    textAlign: 'center',
   },
   weekTaskCountMuted: {
     color: colors.textMuted,
-    fontWeight: '600',
   },
   weekTaskCountSelected: {
     color: colors.primaryDark,
-    fontWeight: '800',
-  },
-  dayTasksSection: {
-    marginTop: 8,
-  },
-  dayTasksHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 12,
-  },
-  dayTasksHeading: {
-    fontSize: 17,
-    fontWeight: '800',
-    color: colors.dark,
-  },
-  dayTasksSub: {
-    fontSize: 13,
-    fontWeight: '600',
-    color: colors.textSecondary,
-  },
-  emptyDayBox: {
-    backgroundColor: colors.white,
-    borderRadius: 12,
-    padding: 24,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  clearFilterBtn: {
-    marginTop: 10,
-    backgroundColor: colors.primary,
-    paddingHorizontal: 14,
-    paddingVertical: 6,
-    borderRadius: 8,
-  },
-  clearFilterBtnText: {
-    color: colors.white,
-    fontSize: 12,
     fontWeight: '700',
   },
-  emptyDayText: {
-    marginTop: 8,
-    fontSize: 14,
-    color: colors.textMuted,
-  },
-  ruleCard: {
-    backgroundColor: colors.white,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 14,
-    marginBottom: 10,
-  },
-  ruleCardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  badgeLine: {
+  unifiedToolbar: {
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
-  },
-  ruleNameBox: {
-    marginLeft: 10,
-    flex: 1,
-  },
-  ruleEqName: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: colors.dark,
-  },
-  ruleGroupName: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
-  ruleCardNotes: {
-    fontSize: 12,
-    color: colors.primaryDark,
-    backgroundColor: colors.primaryVeryLight,
-    padding: 6,
-    borderRadius: 6,
-    marginBottom: 8,
-  },
-  ruleActionsRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 10,
-    borderTopWidth: 1,
-    borderTopColor: colors.borderLight,
-    paddingTop: 8,
-    marginTop: 4,
-  },
-  ruleActionEdit: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: colors.primaryVeryLight,
-  },
-  ruleActionEditText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.primaryDark,
-    marginLeft: 4,
-  },
-  ruleActionDelete: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 6,
-    backgroundColor: '#FEE2E2',
-  },
-  ruleActionDeleteText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.danger,
-    marginLeft: 4,
-  },
-  // Phase 2 Tabs & Approval Styles
-  tabStrip: {
-    flexDirection: 'row',
-    backgroundColor: '#F1F5F9',
-    borderRadius: 10,
-    padding: 4,
+    gap: 12,
     marginBottom: 16,
-    gap: 4,
     flexWrap: 'wrap',
   },
-  tabItem: {
-    paddingVertical: 8,
-    paddingHorizontal: 14,
+  segmentedToggle: {
+    flexDirection: 'row',
+    backgroundColor: '#F1F5F9',
     borderRadius: 8,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
-  tabItemActive: {
+  segmentBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 6,
+  },
+  segmentBtnActive: {
     backgroundColor: colors.white,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.1,
+    shadowOpacity: 0.08,
     shadowRadius: 2,
     elevation: 1,
   },
-  tabItemHighlight: {
-    backgroundColor: '#E0F2FE',
-  },
-  tabText: {
+  segmentBtnText: {
     fontSize: 13,
     fontWeight: '600',
     color: colors.textSecondary,
   },
-  tabTextActive: {
+  segmentBtnTextActive: {
     color: colors.dark,
     fontWeight: '700',
   },
-  approvalBadgeMini: {
+  segmentBadge: {
     backgroundColor: '#0EA5E9',
+    borderRadius: 10,
     paddingHorizontal: 6,
     paddingVertical: 1,
-    borderRadius: 10,
+    minWidth: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  approvalBadgeMiniText: {
+  segmentBadgeText: {
     color: colors.white,
     fontSize: 10,
     fontWeight: '700',
   },
-  approvalActionRow: {
+  searchBox: {
+    flex: 1,
+    minWidth: 220,
+    height: 40,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    flexWrap: 'wrap',
-  },
-  bulkApproveBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderRadius: 8,
-  },
-  bulkApproveText: {
-    color: colors.white,
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  ruleCardSelected: {
-    borderColor: '#0EA5E9',
-    backgroundColor: '#F0F9FF',
-  },
-  ruleCardOverdue: {
-    borderColor: '#FCA5A5',
-    backgroundColor: '#FFFBFB',
-  },
-  dueDateBadge: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.primaryDark,
-    backgroundColor: '#F0F9FF',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  overdueBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#DC2626',
-  },
-  workerActionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#F8FAFC',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 6,
-    marginTop: 6,
-  },
-  workerActionText: {
-    fontSize: 11,
-    color: '#334155',
-  },
-  bold: {
-    fontWeight: '700',
-  },
-  rejectionNoticeBox: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: '#FEF2F2',
-    paddingHorizontal: 8,
-    paddingVertical: 5,
-    borderRadius: 6,
-    marginTop: 6,
-  },
-  rejectionNoticeText: {
-    fontSize: 11,
-    color: '#DC2626',
-    fontWeight: '600',
-  },
-  approvalButtonsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 10,
-  },
-  approvalActionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 8,
-    paddingHorizontal: 16,
-    borderRadius: 8,
-  },
-  approveBtn: {
-    backgroundColor: '#0EA5E9',
-  },
-  approveBtnText: {
-    color: colors.white,
-    fontWeight: '700',
-    fontSize: 13,
-  },
-  rejectBtn: {
     backgroundColor: colors.white,
     borderWidth: 1,
-    borderColor: '#FCA5A5',
+    borderColor: colors.border,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    gap: 8,
   },
-  rejectBtnText: {
-    color: '#DC2626',
+  searchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: colors.dark,
+  },
+  tasksViewContainer: {
+    gap: 14,
+  },
+  smallHeadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  smallHeadingText: {
+    fontSize: 15,
     fontWeight: '700',
-    fontSize: 13,
+    color: colors.dark,
   },
-  rejectModalDesc: {
+  smallHeadingCount: {
     fontSize: 13,
-    color: colors.textSecondary,
-    marginBottom: 14,
-    lineHeight: 18,
+    color: colors.textMuted,
   },
-  rejectErrorText: {
-    color: '#DC2626',
+  compactKpiLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: 8,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    gap: 16,
+  },
+  compactKpiItem: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 6,
+  },
+  compactKpiVal: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: colors.dark,
+  },
+  compactKpiLabel: {
     fontSize: 12,
-    marginTop: 4,
-    fontWeight: '600',
+    color: colors.textSecondary,
+    fontWeight: '500',
   },
-  filterGroupDot: {
+  kpiDivider: {
+    width: 1,
+    height: 16,
+    backgroundColor: colors.border,
+  },
+  emptyCard: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  emptyCardText: {
+    fontSize: 14,
+    color: colors.textMuted,
+  },
+  groupsContainer: {
+    gap: 10,
+  },
+  declutteredGroupCard: {
+    backgroundColor: colors.white,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  groupCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: colors.white,
+  },
+  groupCardHeaderLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  groupCardName: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: colors.dark,
+  },
+  workerGroupDot: {
     width: 8,
     height: 8,
     borderRadius: 4,
+  },
+  groupCardSummary: {
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  expandedUnitsArea: {
+    padding: 12,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderLight,
+    backgroundColor: colors.background,
+    gap: 8,
+  },
+  reportsCard: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 16,
+    width: '100%',
+  },
+  reportsInfoBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    marginBottom: 14,
+    gap: 8,
+  },
+  reportsInfoBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    flex: 1,
+  },
+  reportsInfoBannerText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#92400E',
+  },
+  reportsInfoBannerBtn: {
+    backgroundColor: '#F59E0B',
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 6,
+  },
+  reportsInfoBannerBtnText: {
+    color: colors.white,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  clearFiltersBtn: {
+    marginTop: 6,
+    backgroundColor: colors.primary,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    borderRadius: 6,
+  },
+  clearFiltersBtnText: {
+    color: colors.white,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  tableScrollWrapper: {
+    width: '100%',
+  },
+  tableScrollContent: {
+    width: '100%',
+  },
+  table: {
+    width: '100%',
+    minWidth: 760,
+  },
+  tableHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: colors.border,
+    paddingBottom: 10,
+    marginBottom: 6,
+  },
+  th: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.textSecondary,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+  tableRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
+  },
+  td: {
+    fontSize: 13,
+    color: colors.dark,
+  },
+  colGroup: {
+    flex: 1.4,
+    paddingRight: 8,
+  },
+  colPerson: {
+    flex: 1.2,
+    paddingRight: 8,
+  },
+  colDate: {
+    flex: 1.0,
+    paddingRight: 8,
+  },
+  colNum: {
+    flex: 0.9,
+    textAlign: 'center',
+    justifyContent: 'center',
+  },
+  colStatus: {
+    flex: 1.6,
+    paddingRight: 8,
+  },
+  colAction: {
+    width: 130,
+    flexShrink: 0,
+    alignItems: 'flex-end',
+    justifyContent: 'center',
+  },
+  groupCell: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  dot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+  },
+  groupName: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.dark,
+  },
+  waitingNum: {
+    fontSize: 12,
+    color: '#B45309',
+    marginTop: 2,
+  },
+  boldNum: {
+    fontWeight: '700',
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    alignSelf: 'flex-start',
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+  },
+  pillDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusPillText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  dashText: {
+    color: colors.textMuted,
+    fontSize: 13,
+  },
+  viewBtnOutlined: {
+    borderWidth: 1,
+    borderColor: colors.primary,
+    backgroundColor: colors.white,
+    borderRadius: 6,
+    paddingVertical: 5,
+    paddingHorizontal: 12,
+    flexShrink: 0,
+  },
+  viewBtnOutlinedText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  plainLinkWrapper: {
+    paddingVertical: 5,
+    paddingHorizontal: 4,
+    flexShrink: 0,
+  },
+  plainLinkText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: '600',
   },
   modalOverlay: {
     flex: 1,
@@ -1815,12 +2309,12 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   modalTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: '800',
     color: colors.dark,
   },
   modalFieldLabel: {
-    fontSize: 13,
+    fontSize: 12,
     fontWeight: '700',
     color: colors.dark,
     marginBottom: 6,
@@ -1828,436 +2322,74 @@ const styles = StyleSheet.create({
   modalFreqRow: {
     flexDirection: 'row',
     gap: 8,
+    flexWrap: 'wrap',
   },
   modalFreqBtn: {
-    padding: 6,
+    padding: 4,
     borderRadius: 8,
     borderWidth: 1,
     borderColor: colors.border,
-    minWidth: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: colors.white,
   },
   modalFreqBtnSelected: {
     backgroundColor: colors.dark,
     borderColor: colors.dark,
   },
   modalInput: {
-    backgroundColor: colors.background,
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 8,
-    padding: 10,
-    fontSize: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 13,
     color: colors.dark,
+    backgroundColor: colors.white,
   },
-  modalBtnRow: {
+  modalBtnRowSplit: {
     flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 10,
+    justifyContent: 'space-between',
+    alignItems: 'center',
     marginTop: 20,
   },
+  modalDeleteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+  },
+  modalDeleteText: {
+    color: '#DC2626',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  modalBtnRight: {
+    flexDirection: 'row',
+    gap: 8,
+  },
   modalCancelBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
     borderRadius: 8,
-    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   modalCancelText: {
-    color: colors.textSecondary,
+    fontSize: 13,
     fontWeight: '600',
+    color: colors.textSecondary,
   },
   modalSaveBtn: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
     backgroundColor: colors.primary,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 8,
+    minWidth: 100,
+    alignItems: 'center',
   },
   modalSaveText: {
     color: colors.white,
+    fontSize: 13,
     fontWeight: '700',
-  },
-  // Two-Column Responsive Layout
-  twoColContainer: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 20,
-    marginTop: 8,
-    width: '100%',
-  },
-  twoColStacked: {
-    flexDirection: 'column',
-    gap: 16,
-  },
-  tasksCol: {
-    width: '100%',
-  },
-  overviewCol: {
-    width: '100%',
-  },
-  tasksGrid: {
-    flexDirection: 'column',
-    gap: 8,
-  },
-  tasksGridXl: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 10,
-  },
-  compactTaskCard: {
-    backgroundColor: colors.white,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    minHeight: 64,
-  },
-  compactTaskCardXl: {
-    width: '49.2%',
-  },
-  cardLeftCol: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cardCenterCol: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  cardEqName: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: colors.dark,
-    marginBottom: 2,
-  },
-  cardBreadcrumb: {
-    fontSize: 11,
-    color: colors.textSecondary,
-    fontWeight: '500',
-  },
-  cardInlineNote: {
-    fontSize: 10,
-    color: colors.primaryDark,
-    backgroundColor: colors.primaryVeryLight,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    alignSelf: 'flex-start',
-    marginTop: 4,
-  },
-  cardRightCol: {
-    alignItems: 'flex-end',
-    justifyContent: 'center',
-    gap: 6,
-  },
-  compactActionsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  compactActionBtn: {
-    width: 28,
-    height: 28,
-    borderRadius: 6,
-    backgroundColor: colors.primaryVeryLight,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  compactActionDelete: {
-    backgroundColor: '#FEE2E2',
-  },
-  tasksPagination: {
-    marginTop: 12,
-    borderTopWidth: 1,
-    borderTopColor: colors.borderLight,
-    paddingTop: 8,
-  },
-  // Assignee filter bar
-  assigneeFilterBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    gap: 6,
-    marginTop: 8,
-  },
-  assigneeFilterLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.textMuted,
-  },
-  assigneeFilterPill: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    backgroundColor: '#F1F5F9',
-    borderWidth: 1,
-    borderColor: '#E2E8F0',
-  },
-  assigneeFilterPillActive: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
-  },
-  assigneeFilterText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.textDark,
-  },
-  assigneeFilterTextActive: {
-    color: colors.white,
-  },
-  // Card assignees
-  cardAssigneesRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 8,
-    paddingTop: 6,
-    borderTopWidth: 1,
-    borderTopColor: '#F1F5F9',
-  },
-  cardAssigneesLabel: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.textMuted,
-  },
-  unassignedChip: {
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: colors.primary,
-    backgroundColor: '#F0F9FF',
-  },
-  unassignedChipText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.primaryDark,
-  },
-  cardAvatarGroup: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    flex: 1,
-  },
-  cardMiniAvatar: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: '#0284C7',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cardMiniAvatarText: {
-    fontSize: 9,
-    fontWeight: '700',
-    color: colors.white,
-  },
-  cardMoreAssignees: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.textMuted,
-  },
-  cardAssigneeNames: {
-    fontSize: 12,
-    color: colors.textDark,
-    fontWeight: '600',
-    marginLeft: 4,
-  },
-  // Day Overview Panel Card
-  overviewCard: {
-    backgroundColor: colors.white,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 16,
-  },
-  overviewHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 14,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderLight,
-  },
-  overviewTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  overviewTitle: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: colors.dark,
-    letterSpacing: 0.3,
-  },
-  overviewDateText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: colors.textSecondary,
-  },
-  metricsRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 14,
-    gap: 6,
-  },
-  metricItem: {
-    flex: 1,
-    backgroundColor: colors.background,
-    borderRadius: 8,
-    paddingVertical: 8,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: colors.borderLight,
-  },
-  metricItemDone: {
-    backgroundColor: 'rgba(16, 185, 129, 0.08)',
-    borderColor: 'rgba(16, 185, 129, 0.2)',
-  },
-  metricItemPending: {
-    backgroundColor: 'rgba(14, 165, 233, 0.08)',
-    borderColor: 'rgba(14, 165, 233, 0.2)',
-  },
-  metricItemOverdue: {
-    backgroundColor: 'rgba(239, 68, 68, 0.08)',
-    borderColor: 'rgba(239, 68, 68, 0.2)',
-  },
-  metricVal: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: colors.dark,
-  },
-  metricLabel: {
-    fontSize: 10,
-    fontWeight: '600',
-    color: colors.textSecondary,
-    marginTop: 2,
-  },
-  progSection: {
-    marginBottom: 14,
-  },
-  progHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
-  },
-  progLabel: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.textSecondary,
-  },
-  progPercent: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: colors.primary,
-  },
-  progTrack: {
-    height: 6,
-    backgroundColor: '#E4E4E7',
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  progFill: {
-    height: '100%',
-    backgroundColor: colors.primary,
-    borderRadius: 3,
-  },
-  breakdownSection: {
-    marginBottom: 12,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: colors.borderLight,
-  },
-  breakdownTitle: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: colors.textMuted,
-    letterSpacing: 0.8,
-    marginBottom: 8,
-  },
-  sysRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 4,
-  },
-  sysRowLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  sysDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    marginRight: 6,
-  },
-  sysName: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: colors.dark,
-    flex: 1,
-  },
-  sysRowRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    width: 80,
-  },
-  sysBarTrack: {
-    flex: 1,
-    height: 4,
-    backgroundColor: '#E4E4E7',
-    borderRadius: 2,
-    overflow: 'hidden',
-  },
-  sysBarFill: {
-    height: '100%',
-    borderRadius: 2,
-  },
-  sysCountText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.dark,
-    minWidth: 16,
-    textAlign: 'right',
-  },
-  freqBadgeGrid: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  freqBadgeItem: {
-    alignItems: 'center',
-    gap: 4,
-  },
-  freqCountText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.dark,
-  },
-  quickAddRuleBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(14, 165, 233, 0.08)',
-    borderWidth: 1,
-    borderColor: 'rgba(14, 165, 233, 0.3)',
-    borderRadius: 8,
-    paddingVertical: 9,
-    marginTop: 6,
-  },
-  quickAddRuleText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.primaryDark,
   },
 });
-

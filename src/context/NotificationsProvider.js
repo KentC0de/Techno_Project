@@ -183,9 +183,9 @@ export function NotificationsProvider({ children }) {
         const toastTitle = newNotif.title || 'Notification';
         const toastBody = newNotif.body || '';
         const toastType =
-          newNotif.type === 'task_rejected'
+          newNotif.type === 'report_returned'
             ? 'error'
-            : newNotif.type === 'task_approved'
+            : newNotif.type === 'report_reviewed'
             ? 'success'
             : 'info';
 

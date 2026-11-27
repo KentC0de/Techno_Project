@@ -1,10 +1,9 @@
 import React, { useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, StyleSheet, Image, Modal } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import FrequencyBadge from './FrequencyBadge';
 import TaskStatusChip from './TaskStatusChip';
 import TaskActionModal from './TaskActionModal';
-import WorkerGroupBadge from './WorkerGroupBadge';
+import { useTaskPhotoUrls } from '../lib/taskPhotos';
 import { colors } from '../theme';
 
 function formatSimpleTime(isoStr) {
@@ -26,7 +25,9 @@ export default function TaskCard({
   profileMap = null,
 }) {
   const [modalVisible, setModalVisible] = useState(false);
-  const [actionType, setActionType] = useState('done');
+  const [actionType, setActionType] = useState('completed');
+  const [lightboxUri, setLightboxUri] = useState(null);
+  const [isExpanded, setIsExpanded] = useState(false);
 
   const {
     equipment,
@@ -40,19 +41,26 @@ export default function TaskCard({
     log,
   } = task;
 
+  const photoPaths = Array.isArray(log?.photo_paths) ? log.photo_paths : [];
+  const photoUrls = useTaskPhotoUrls(photoPaths);
+
   const handleActionClick = (type) => {
     setActionType(type);
     setModalVisible(true);
   };
 
-  const handleModalSubmit = async (type, note) => {
-    await onUpdateStatus(task, type, note);
+  const handleModalSubmit = async (type, note, photos) => {
+    await onUpdateStatus(task, type, note, photos);
   };
 
+  const taskState = task.taskState || (status === 'rejected' ? 'returned' : status);
+  const isDraftCompleted = log?.status === 'draft' && log?.result !== 'issue';
+  const isDraftIssue = log?.status === 'draft' && log?.result === 'issue';
+  const isDraft = log?.status === 'draft';
   const isSubmitted = status === 'submitted';
   const isDone = status === 'done';
-  const isRejected = status === 'rejected';
-  const isIssueOrSkipped = status === 'issue' || status === 'skipped';
+  const isReturned = status === 'rejected' || taskState === 'returned';
+  const isPendingOrOverdue = status === 'pending' || status === 'overdue';
 
   // Submitter & Approver names
   const submitterName = log?.done_by
@@ -63,191 +71,193 @@ export default function TaskCard({
     ? (profileMap?.get ? profileMap.get(log.approved_by || log.reviewed_by) : profileMap?.[log.approved_by || log.reviewed_by]) || log.approved_by_name || 'Admin'
     : null;
 
-  const isMySubmission = isSubmitted && log?.done_by && currentUserId && log.done_by === currentUserId;
+  const isMyDraft = isDraft && log?.done_by && currentUserId && log.done_by === currentUserId;
+  const hasNotesOrPhotos = !!notes || !!log?.notes || photoUrls.length > 0;
 
   return (
     <View
       style={[
         styles.card,
-        isOverdue && styles.overdueCard,
+        isOverdue && isPendingOrOverdue && styles.overdueCard,
         isDone && styles.doneCard,
-        isRejected && styles.rejectedCard,
+        isReturned && styles.rejectedCard,
       ]}
     >
-      {/* Top row: Frequency badge, Group & Area, and Status */}
-      <View style={styles.topRow}>
-        <View style={styles.badgeGroup}>
-          <FrequencyBadge freq={frequency} size="medium" />
-          <View style={styles.titleInfo}>
-            <Text style={styles.groupName} numberOfLines={1}>
-              {group?.name || 'General Maintenance'}
-            </Text>
-            {equipment?.area ? (
-              <View style={styles.areaTag}>
-                <Text style={styles.areaText}>{equipment.area}</Text>
-              </View>
-            ) : null}
-          </View>
+      {/* Unit row (1-line equipment name, status pill, 3 icon buttons: check, warning, camera with 44px hit areas) */}
+      <TouchableOpacity
+        style={styles.unitRowMain}
+        onPress={() => setIsExpanded((prev) => !prev)}
+        activeOpacity={0.7}
+      >
+        <View style={styles.equipNameWrap}>
+          <Text style={styles.equipmentName} numberOfLines={1} ellipsizeMode="tail">
+            {equipment?.name || 'Equipment'}
+          </Text>
+          {hasNotesOrPhotos && (
+            <View style={styles.infoDot} />
+          )}
         </View>
 
-        <TaskStatusChip status={status} />
-      </View>
-
-      {/* Main Content */}
-      <View style={styles.mainContent}>
-        <Text style={styles.equipmentName}>{equipment?.name || 'Equipment'}</Text>
-        {category?.name ? (
-          <Text style={styles.categorySubtext}>{category.code}. {category.name}</Text>
+        {taskState !== 'pending' && taskState !== 'overdue' ? (
+          <TaskStatusChip status={taskState} size="small" />
         ) : null}
-      </View>
 
-      {/* Worker Group Badge */}
-      <View style={{ marginTop: 4, marginBottom: 8 }}>
-        <WorkerGroupBadge group={task.rule?.worker_group || task.worker_group} />
-      </View>
+        {/* 3 ICON BUTTONS with 44px hit areas: check, warning, camera */}
+        {canEdit && !isSubmitted && !isDone && (
+          <View style={styles.iconButtonsWrap}>
+            {/* Check Button (Mark Completed) */}
+            <TouchableOpacity
+              style={[styles.iconButton, styles.checkIconButton]}
+              onPress={() => onUpdateStatus && onUpdateStatus(task, 'completed', null)}
+              activeOpacity={0.7}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+              accessibilityRole="button"
+              accessibilityLabel="Mark Completed"
+            >
+              <Ionicons name="checkmark" size={20} color="#FFFFFF" />
+            </TouchableOpacity>
 
-      {/* Schedule Notes if any */}
-      {notes ? (
-        <View style={styles.adminNoteBox}>
-          <Ionicons
-            name="information-circle-outline"
-            size={16}
-            color={colors.primaryDark}
-            style={{ marginRight: 6 }}
-          />
-          <Text style={styles.adminNoteText}>Schedule Note: {notes}</Text>
-        </View>
-      ) : null}
+            {/* Warning Button (Report Issue) */}
+            <TouchableOpacity
+              style={[styles.iconButton, styles.warningIconButton]}
+              onPress={() => handleActionClick('issue')}
+              activeOpacity={0.7}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+              accessibilityRole="button"
+              accessibilityLabel="Report Issue"
+            >
+              <Ionicons name="warning-outline" size={19} color="#B45309" />
+            </TouchableOpacity>
 
-      {/* SUBMITTED STATE BANNER */}
-      {isSubmitted && (
-        <View style={styles.submittedBanner}>
-          <Ionicons name="time-outline" size={16} color="#0284C7" style={{ marginRight: 6 }} />
-          <Text style={styles.submittedBannerText}>
-            Waiting for admin approval • Submitted by {submitterName}
-            {log?.submitted_at || log?.done_at ? ` at ${formatSimpleTime(log.submitted_at || log.done_at)}` : ''}
-          </Text>
-        </View>
-      )}
-
-      {/* DONE / APPROVED STATE BANNER */}
-      {isDone && (
-        <View style={styles.doneBanner}>
-          <Ionicons name="checkmark-circle" size={16} color="#15803D" style={{ marginRight: 6 }} />
-          <Text style={styles.doneBannerText}>
-            Done by {submitterName} — {approverName ? `approved by ${approverName}` : 'Approved'}
-            {log?.approved_at || log?.reviewed_at ? ` at ${formatSimpleTime(log.approved_at || log.reviewed_at)}` : ''}
-          </Text>
-        </View>
-      )}
-
-      {/* REJECTED HIGHLIGHT BOX */}
-      {isRejected && (
-        <View style={styles.rejectedBox}>
-          <View style={styles.rejectedBoxHeader}>
-            <Ionicons name="alert-circle" size={16} color="#DC2626" style={{ marginRight: 6 }} />
-            <Text style={styles.rejectedBoxTitle}>Needs Redo — Rejected by Admin</Text>
+            {/* Camera Button (Complete with photos or edit photos) */}
+            <TouchableOpacity
+              style={[styles.iconButton, styles.cameraIconButton]}
+              onPress={() => handleActionClick(isDraft ? (log?.result === 'issue' ? 'issue' : 'completed') : 'completed')}
+              activeOpacity={0.7}
+              hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+              accessibilityRole="button"
+              accessibilityLabel={isDraft ? "Edit photos" : "Complete with photos"}
+            >
+              <Ionicons name="camera-outline" size={19} color={colors.primary} />
+              {photoUrls.length > 0 && (
+                <View style={styles.photoCountBadge}>
+                  <Text style={styles.photoCountText}>{photoUrls.length}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
-          <Text style={styles.rejectedReasonText}>
-            Reason: {log?.review_note || 'Please review and redo this maintenance task.'}
-          </Text>
-        </View>
-      )}
+        )}
 
-      {/* Worker Log Note if any */}
-      {log?.notes && !isRejected ? (
-        <View
-          style={[
-            styles.logNoteBox,
-            status === 'issue' && styles.issueNoteBox,
-          ]}
-        >
-          <Ionicons
-            name={status === 'issue' ? 'alert-circle-outline' : 'chatbubble-ellipses-outline'}
-            size={16}
-            color={status === 'issue' ? colors.danger : colors.textSecondary}
-            style={{ marginRight: 6 }}
-          />
-          <Text
-            style={[
-              styles.logNoteText,
-              status === 'issue' && styles.issueNoteText,
-            ]}
+        {/* Undo button for draft */}
+        {isMyDraft && (
+          <TouchableOpacity
+            style={styles.undoIconTouch}
+            onPress={() => onUndoStatus && onUndoStatus(task)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Undo Completion"
           >
-            Worker Note: {log.notes}
-          </Text>
-        </View>
-      ) : null}
+            <Ionicons name="arrow-undo-outline" size={18} color={colors.dark} />
+          </TouchableOpacity>
+        )}
+      </TouchableOpacity>
 
-      {/* Action Buttons */}
-      {canEdit && (
-        <View style={styles.actionsRow}>
-          {/* Pending / Overdue state: Mark Done, Issue, Skip */}
-          {(status === 'pending' || status === 'overdue') && (
-            <>
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.doneBtn]}
-                onPress={() => handleActionClick('done')}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="checkmark-sharp" size={18} color={colors.white} />
-                <Text style={styles.doneBtnText}>Mark Done</Text>
-              </TouchableOpacity>
+      {/* Expanded Details when row is tapped */}
+      {isExpanded && (
+        <View style={styles.expandedSection}>
+          {category?.name ? (
+            <Text style={styles.categorySubtext}>
+              {category.code}. {category.name} {equipment?.area ? `• ${equipment.area}` : ''}
+            </Text>
+          ) : null}
 
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.issueBtn]}
-                onPress={() => handleActionClick('issue')}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="warning-outline" size={16} color={colors.danger} />
-                <Text style={styles.issueBtnText}>Issue</Text>
-              </TouchableOpacity>
+          {/* Schedule Notes if any */}
+          {notes ? (
+            <View style={styles.adminNoteBox}>
+              <Ionicons
+                name="information-circle-outline"
+                size={16}
+                color={colors.primaryDark}
+                style={{ marginRight: 6 }}
+              />
+              <Text style={styles.adminNoteText}>Schedule Note: {notes}</Text>
+            </View>
+          ) : null}
 
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.skipBtn]}
-                onPress={() => handleActionClick('skipped')}
-                activeOpacity={0.8}
-              >
-                <Ionicons name="play-forward-outline" size={16} color={colors.textSecondary} />
-                <Text style={styles.skipBtnText}>Skip</Text>
-              </TouchableOpacity>
-            </>
+          {/* SUBMITTED STATE BANNER */}
+          {isSubmitted && (
+            <View style={styles.submittedBanner}>
+              <Ionicons name="time-outline" size={16} color="#0284C7" style={{ marginRight: 6 }} />
+              <Text style={styles.submittedBannerText}>
+                Waiting for admin approval • Submitted by {submitterName}
+                {log?.submitted_at || log?.done_at ? ` at ${formatSimpleTime(log.submitted_at || log.done_at)}` : ''}
+              </Text>
+            </View>
           )}
 
-          {/* Submitted state: Cancel submission button (if current user submitted) */}
-          {isSubmitted && isMySubmission && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.cancelSubmissionBtn]}
-              onPress={() => onCancelSubmission && onCancelSubmission(task)}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="close-circle-outline" size={16} color="#DC2626" />
-              <Text style={styles.cancelSubmissionText}>Cancel submission</Text>
-            </TouchableOpacity>
+          {/* DONE / APPROVED STATE BANNER */}
+          {isDone && (
+            <View style={styles.doneBanner}>
+              <Ionicons name="checkmark-circle" size={16} color="#15803D" style={{ marginRight: 6 }} />
+              <Text style={styles.doneBannerText}>
+                Done by {submitterName} - {approverName ? `approved by ${approverName}` : 'Approved'}
+                {log?.approved_at || log?.reviewed_at ? ` at ${formatSimpleTime(log.approved_at || log.reviewed_at)}` : ''}
+              </Text>
+            </View>
           )}
 
-          {/* Rejected state: Redo and resubmit button */}
-          {isRejected && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.redoBtn]}
-              onPress={() => handleActionClick('done')}
-              activeOpacity={0.8}
-            >
-              <Ionicons name="refresh-outline" size={18} color={colors.white} />
-              <Text style={styles.redoBtnText}>Redo and resubmit</Text>
-            </TouchableOpacity>
+          {/* REJECTED / RETURNED HIGHLIGHT BOX */}
+          {isReturned && (
+            <View style={styles.rejectedBox}>
+              <View style={styles.rejectedBoxHeader}>
+                <Ionicons name="alert-circle" size={16} color="#DC2626" style={{ marginRight: 6 }} />
+                <Text style={styles.rejectedBoxTitle}>Returned for Correction by Admin</Text>
+              </View>
+              <Text style={styles.rejectedReasonText}>
+                Remarks: {log?.review_note || 'Please review and redo this maintenance task.'}
+              </Text>
+            </View>
           )}
 
-          {/* Issue or Skipped: Undo / Reopen button */}
-          {isIssueOrSkipped && (
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.undoBtn]}
-              onPress={() => onUndoStatus(task)}
-              activeOpacity={0.8}
+          {/* Worker Log Note if any */}
+          {log?.notes && !isReturned ? (
+            <View
+              style={[
+                styles.logNoteBox,
+                (isDraftIssue || taskState === 'issue') && styles.issueNoteBox,
+              ]}
             >
-              <Ionicons name="arrow-undo-outline" size={16} color={colors.dark} />
-              <Text style={styles.undoBtnText}>Undo / Reopen</Text>
-            </TouchableOpacity>
+              <Ionicons
+                name={isDraftIssue || taskState === 'issue' ? 'warning-outline' : 'chatbubble-ellipses-outline'}
+                size={16}
+                color={isDraftIssue || taskState === 'issue' ? '#B45309' : colors.textSecondary}
+                style={{ marginRight: 6 }}
+              />
+              <Text
+                style={[
+                  styles.logNoteText,
+                  (isDraftIssue || taskState === 'issue') && styles.issueNoteText,
+                ]}
+              >
+                Worker Note: {log.notes}
+              </Text>
+            </View>
+          ) : null}
+
+          {/* Photo thumbnails */}
+          {photoUrls.length > 0 && (
+            <View style={styles.photoThumbStrip}>
+              {photoUrls.map((uri, idx) => (
+                <TouchableOpacity
+                  key={idx}
+                  style={styles.photoThumbTouch}
+                  onPress={() => setLightboxUri(uri)}
+                  activeOpacity={0.8}
+                >
+                  <Image source={{ uri }} style={styles.photoThumbImg} />
+                </TouchableOpacity>
+              ))}
+            </View>
           )}
         </View>
       )}
@@ -260,6 +270,30 @@ export default function TaskCard({
         onClose={() => setModalVisible(false)}
         onSubmit={handleModalSubmit}
       />
+
+      {/* Lightbox Modal */}
+      {lightboxUri && (
+        <Modal
+          visible={!!lightboxUri}
+          transparent
+          animationType="fade"
+          onRequestClose={() => setLightboxUri(null)}
+        >
+          <View style={styles.lightboxOverlay}>
+            <TouchableOpacity
+              style={styles.lightboxClose}
+              onPress={() => setLightboxUri(null)}
+            >
+              <Ionicons name="close" size={28} color="#FFFFFF" />
+            </TouchableOpacity>
+            <Image
+              source={{ uri: lightboxUri }}
+              style={styles.lightboxImg}
+              resizeMode="contain"
+            />
+          </View>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -267,11 +301,12 @@ export default function TaskCard({
 const styles = StyleSheet.create({
   card: {
     backgroundColor: colors.white,
-    borderRadius: 14,
+    borderRadius: 12,
     borderWidth: 1,
     borderColor: colors.border,
-    padding: 16,
-    marginBottom: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
   },
   overdueCard: {
     borderColor: '#FCA5A5',
@@ -285,66 +320,103 @@ const styles = StyleSheet.create({
     borderColor: '#FCA5A5',
     backgroundColor: '#FFFBFB',
   },
-  topRow: {
+  unitRowMain: {
     flexDirection: 'row',
+    alignItems: 'center',
     justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
+    minHeight: 44,
+    gap: 8,
   },
-  badgeGroup: {
+  equipNameWrap: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    flex: 1,
-    marginRight: 8,
-  },
-  titleInfo: {
-    marginLeft: 10,
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexWrap: 'wrap',
-    flex: 1,
-  },
-  groupName: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: colors.dark,
-    marginRight: 6,
-  },
-  areaTag: {
-    backgroundColor: colors.primaryVeryLight,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: colors.primaryLight,
-  },
-  areaText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.primaryDark,
-  },
-  mainContent: {
-    marginBottom: 6,
+    marginRight: 4,
   },
   equipmentName: {
-    fontSize: 16,
+    fontSize: 14,
+    fontWeight: '600',
+    color: colors.textPrimary,
+    flexShrink: 1,
+  },
+  infoDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.primary,
+    marginLeft: 6,
+  },
+  iconButtonsWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  iconButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  checkIconButton: {
+    backgroundColor: colors.primary,
+  },
+  warningIconButton: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+  },
+  cameraIconButton: {
+    backgroundColor: '#F0F9FF',
+    borderWidth: 1,
+    borderColor: '#BAE6FD',
+  },
+  photoCountBadge: {
+    position: 'absolute',
+    top: 3,
+    right: 3,
+    backgroundColor: colors.primary,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoCountText: {
+    color: '#FFFFFF',
+    fontSize: 9,
     fontWeight: '700',
-    color: colors.dark,
-    lineHeight: 22,
+  },
+  undoIconTouch: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+    backgroundColor: colors.background,
+    borderWidth: 1,
+    borderColor: colors.borderDark,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  expandedSection: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderLight,
   },
   categorySubtext: {
     fontSize: 12,
     color: colors.textSecondary,
-    marginTop: 2,
+    marginBottom: 6,
   },
   adminNoteBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.primaryVeryLight,
+    backgroundColor: '#EFF6FF',
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 8,
-    marginBottom: 10,
+    borderRadius: 6,
+    marginBottom: 8,
   },
   adminNoteText: {
     fontSize: 12,
@@ -355,16 +427,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#F0F9FF',
-    borderWidth: 1,
-    borderColor: '#BAE6FD',
-    borderRadius: 8,
     paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginBottom: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginBottom: 8,
   },
   submittedBannerText: {
     fontSize: 12,
-    fontWeight: '600',
     color: '#0284C7',
     flex: 1,
   },
@@ -372,16 +441,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: '#F0FDF4',
-    borderWidth: 1,
-    borderColor: '#BBF7D0',
-    borderRadius: 8,
     paddingHorizontal: 10,
-    paddingVertical: 8,
-    marginBottom: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginBottom: 8,
   },
   doneBannerText: {
     fontSize: 12,
-    fontWeight: '600',
     color: '#15803D',
     flex: 1,
   },
@@ -391,7 +457,7 @@ const styles = StyleSheet.create({
     borderColor: '#FCA5A5',
     borderRadius: 8,
     padding: 10,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   rejectedBoxHeader: {
     flexDirection: 'row',
@@ -417,7 +483,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: colors.borderLight,
-    marginBottom: 10,
+    marginBottom: 8,
   },
   logNoteText: {
     fontSize: 12,
@@ -432,92 +498,43 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontWeight: '600',
   },
-  actionsRow: {
+  photoThumbStrip: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginTop: 4,
     flexWrap: 'wrap',
+    gap: 8,
+    marginTop: 6,
+    marginBottom: 6,
   },
-  actionBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    minHeight: 44,
-    paddingHorizontal: 14,
-    borderRadius: 10,
-  },
-  doneBtn: {
-    backgroundColor: colors.primary,
-    flex: 2,
-    minWidth: 120,
-  },
-  doneBtnText: {
-    color: colors.white,
-    fontWeight: '700',
-    fontSize: 14,
-    marginLeft: 6,
-  },
-  redoBtn: {
-    backgroundColor: '#0EA5E9',
-    flex: 1,
-    minWidth: 150,
-  },
-  redoBtnText: {
-    color: colors.white,
-    fontWeight: '700',
-    fontSize: 14,
-    marginLeft: 6,
-  },
-  cancelSubmissionBtn: {
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    borderColor: '#FCA5A5',
-    paddingHorizontal: 12,
-  },
-  cancelSubmissionText: {
-    color: '#DC2626',
-    fontWeight: '600',
-    fontSize: 12,
-    marginLeft: 4,
-  },
-  issueBtn: {
-    backgroundColor: colors.white,
-    borderWidth: 1,
-    borderColor: colors.danger,
-    flex: 1,
-    minWidth: 80,
-  },
-  issueBtnText: {
-    color: colors.danger,
-    fontWeight: '700',
-    fontSize: 13,
-    marginLeft: 4,
-  },
-  skipBtn: {
-    backgroundColor: colors.background,
+  photoThumbTouch: {
+    width: 48,
+    height: 48,
+    borderRadius: 6,
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: colors.border,
+  },
+  photoThumbImg: {
+    width: '100%',
+    height: '100%',
+  },
+  lightboxOverlay: {
     flex: 1,
-    minWidth: 70,
+    backgroundColor: 'rgba(0,0,0,0.92)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  skipBtnText: {
-    color: colors.textSecondary,
-    fontWeight: '600',
-    fontSize: 13,
-    marginLeft: 4,
+  lightboxClose: {
+    position: 'absolute',
+    top: 40,
+    right: 20,
+    zIndex: 10,
+    width: 44,
+    height: 44,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  undoBtn: {
-    backgroundColor: colors.background,
-    borderWidth: 1,
-    borderColor: colors.borderDark,
-    paddingHorizontal: 16,
-    flex: 1,
-  },
-  undoBtnText: {
-    color: colors.dark,
-    fontWeight: '700',
-    fontSize: 13,
-    marginLeft: 6,
+  lightboxImg: {
+    width: '90%',
+    height: '80%',
   },
 });

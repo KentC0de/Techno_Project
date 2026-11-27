@@ -7,6 +7,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { supabase, isConfigured } from './supabase';
 import { getAuthRedirectUrl } from './authRedirect';
 import {
+  formatDate,
+  expandRuleDueDates,
+} from '../utils/schedule';
+import {
   INITIAL_CATEGORIES,
   INITIAL_GROUPS,
   INITIAL_EQUIPMENT,
@@ -479,6 +483,387 @@ export async function deleteScheduleRule(id) {
     rules = rules.filter((r) => r.id !== id);
     await setStored(STORAGE_KEYS.RULES, rules);
   }
+}
+
+export async function countRuleTaskLogs(ruleId) {
+  if (!ruleId) return { total: 0, submitted: 0 };
+  if (isConfigured) {
+    const [totalRes, submittedRes] = await Promise.all([
+      supabase
+        .from('task_logs')
+        .select('id', { count: 'exact', head: true })
+        .eq('rule_id', ruleId),
+      supabase
+        .from('task_logs')
+        .select('id', { count: 'exact', head: true })
+        .eq('rule_id', ruleId)
+        .eq('status', 'submitted'),
+    ]);
+    if (totalRes.error) throw totalRes.error;
+    if (submittedRes.error) throw submittedRes.error;
+    return {
+      total: totalRes.count || 0,
+      submitted: submittedRes.count || 0,
+    };
+  }
+  await initializeMockDataIfNeeded();
+  const logs = await getStored(STORAGE_KEYS.LOGS, []);
+  const matching = logs.filter((l) => l.rule_id === ruleId);
+  return {
+    total: matching.length,
+    submitted: matching.filter((l) => l.status === 'submitted').length,
+  };
+}
+
+async function fetchInChunks(table, selectCols, column, ids) {
+  const uniqueIds = [...new Set((ids || []).filter(Boolean))];
+  if (uniqueIds.length === 0) return [];
+  const CHUNK_SIZE = 200;
+  const results = [];
+  for (let i = 0; i < uniqueIds.length; i += CHUNK_SIZE) {
+    const chunk = uniqueIds.slice(i, i + CHUNK_SIZE);
+    const { data, error } = await supabase
+      .from(table)
+      .select(selectCols)
+      .in(column, chunk);
+    if (error) throw error;
+    if (data && data.length > 0) {
+      results.push(...data);
+    }
+  }
+  return results;
+}
+
+/**
+ * Load full context for any list of task_logs rows by their IDs,
+ * independent of visible date range, selected day, filters, or equipment is_active.
+ * Chunks `.in()` queries by 200 and throws errors (never swallows them).
+ */
+export async function loadTaskContext(logs) {
+  if (!Array.isArray(logs) || logs.length === 0) return [];
+  if (!isConfigured) {
+    throw new Error('Supabase is not configured. Check EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY in .env.');
+  }
+
+  const ruleIds = [...new Set(logs.map((l) => l.rule_id).filter(Boolean))];
+  const personIds = [
+    ...new Set(
+      logs.flatMap((l) => [l.done_by, l.approved_by, l.reviewed_by]).filter(Boolean)
+    ),
+  ];
+
+  const [rules, profiles] = await Promise.all([
+    fetchInChunks(
+      'schedule_rules',
+      'id, frequency, start_date, end_date, weekday, notes, equipment_id, worker_group_id',
+      'id',
+      ruleIds
+    ),
+    fetchInChunks('profiles', 'id, full_name', 'id', personIds),
+  ]);
+
+  const equipmentIds = [...new Set(rules.map((r) => r.equipment_id).filter(Boolean))];
+  const workerGroupIds = [...new Set(rules.map((r) => r.worker_group_id).filter(Boolean))];
+
+  const [equipments, workerGroups] = await Promise.all([
+    fetchInChunks(
+      'equipment',
+      'id, name, area, unit_count, group_id, is_active',
+      'id',
+      equipmentIds
+    ),
+    fetchInChunks(
+      'worker_groups',
+      'id, name, color, shift_label',
+      'id',
+      workerGroupIds
+    ),
+  ]);
+
+  const groupIds = [...new Set(equipments.map((e) => e.group_id).filter(Boolean))];
+  const groups = await fetchInChunks(
+    'groups',
+    'id, name, item_no, category_id',
+    'id',
+    groupIds
+  );
+
+  const categoryIds = [...new Set(groups.map((g) => g.category_id).filter(Boolean))];
+  const categories = await fetchInChunks(
+    'categories',
+    'id, code, name',
+    'id',
+    categoryIds
+  );
+
+  const rulesMap = new Map(rules.map((r) => [r.id, r]));
+  const equipmentsMap = new Map(equipments.map((e) => [e.id, e]));
+  const groupsMap = new Map(groups.map((g) => [g.id, g]));
+  const categoriesMap = new Map(categories.map((c) => [c.id, c]));
+  const workerGroupsMap = new Map(workerGroups.map((wg) => [wg.id, wg]));
+  const profilesMap = new Map(profiles.map((p) => [p.id, p]));
+
+  return logs.map((log) => {
+    const rule = log.rule_id ? rulesMap.get(log.rule_id) || null : null;
+    const equipment = rule?.equipment_id ? equipmentsMap.get(rule.equipment_id) || null : null;
+    const group = equipment?.group_id ? groupsMap.get(equipment.group_id) || null : null;
+    const category = group?.category_id ? categoriesMap.get(group.category_id) || null : null;
+    const workerGroup = rule?.worker_group_id ? workerGroupsMap.get(rule.worker_group_id) || null : null;
+    const worker = log.done_by ? profilesMap.get(log.done_by) || null : null;
+    const approverId = log.approved_by || log.reviewed_by;
+    const approver = approverId ? profilesMap.get(approverId) || null : null;
+
+    return {
+      log,
+      rule,
+      equipment,
+      group,
+      category,
+      workerGroup,
+      worker,
+      approver,
+    };
+  });
+}
+
+export async function fetchRuleDirect(ruleId) {
+  if (!ruleId) return { data: null, error: null };
+  if (!isConfigured) {
+    return {
+      data: null,
+      error: new Error('Supabase is not configured. Check EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY in .env.'),
+    };
+  }
+  return await supabase
+    .from('schedule_rules')
+    .select('id, frequency, start_date, end_date, weekday, notes, equipment_id, worker_group_id')
+    .eq('id', ruleId)
+    .maybeSingle();
+}
+
+export async function fetchTaskLogById(logId) {
+  if (!logId) return null;
+  if (!isConfigured) {
+    throw new Error('Supabase is not configured. Check EXPO_PUBLIC_SUPABASE_URL and EXPO_PUBLIC_SUPABASE_ANON_KEY in .env.');
+  }
+  const { data, error } = await supabase
+    .from('task_logs')
+    .select('*')
+    .eq('id', logId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  const contexts = await loadTaskContext([data]);
+  return contexts[0] || null;
+}
+
+export async function deleteTaskLogById(logId) {
+  if (!logId) return;
+  if (isConfigured) {
+    const { error } = await supabase.from('task_logs').delete().eq('id', logId);
+    if (error) throw error;
+  } else {
+    await initializeMockDataIfNeeded();
+    let logs = await getStored(STORAGE_KEYS.LOGS, []);
+    logs = logs.filter((l) => l.id !== logId);
+    await setStored(STORAGE_KEYS.LOGS, logs);
+  }
+}
+
+export async function fetchGroupDailyReports(groupId, limit = 30) {
+  if (!groupId || !isConfigured) return [];
+  const { data, error } = await supabase
+    .from('daily_reports')
+    .select('*')
+    .eq('worker_group_id', groupId)
+    .order('report_date', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return data || [];
+}
+
+export async function submitDailyReport({ groupId, reportDate, tasksAssigned, note }) {
+  if (!isConfigured) {
+    throw new Error('Supabase is not configured.');
+  }
+  const { data, error } = await supabase.rpc('submit_daily_report', {
+    p_group_id: groupId,
+    p_report_date: reportDate,
+    p_tasks_assigned: tasksAssigned,
+    p_note: note?.trim() ? note.trim() : null,
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function reviewDailyReport({ reportId, decision, remarks, flags = [] }) {
+  if (!isConfigured) {
+    throw new Error('Supabase is not configured.');
+  }
+  const { data, error } = await supabase.rpc('review_daily_report', {
+    p_report_id: reportId,
+    p_decision: decision,
+    p_remarks: remarks?.trim() ? remarks.trim() : null,
+    p_flags: flags,
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function resolveTaskIssue({ logId, resolution }) {
+  if (!isConfigured) {
+    throw new Error('Supabase is not configured.');
+  }
+  const { data, error } = await supabase.rpc('resolve_task_issue', {
+    p_log_id: logId,
+    p_resolution: resolution?.trim() ? resolution.trim() : null,
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function fetchReportDetailData({ groupId, date, reportId = null }) {
+  if (!isConfigured) {
+    throw new Error('Supabase is not configured.');
+  }
+
+  let resolvedGroupId = groupId || null;
+  let resolvedDate = date || null;
+  let report = null;
+
+  if (reportId && (!resolvedGroupId || !resolvedDate)) {
+    const { data: repById, error: repByIdErr } = await supabase
+      .from('daily_reports')
+      .select('*')
+      .eq('id', reportId)
+      .maybeSingle();
+    if (repByIdErr) throw repByIdErr;
+    if (repById) {
+      report = repById;
+      resolvedGroupId = repById.worker_group_id;
+      resolvedDate = repById.report_date;
+    }
+  }
+
+  if (!resolvedGroupId || !resolvedDate) {
+    return {
+      report: null,
+      groupId: resolvedGroupId,
+      reportDate: resolvedDate || formatDate(new Date()),
+      workerGroup: null,
+      tasks: [],
+      profilesMap: new Map(),
+    };
+  }
+
+  const [rulesRes, wgRes, reportRes] = await Promise.all([
+    supabase
+      .from('schedule_rules')
+      .select('id, frequency, start_date, end_date, weekday, notes, equipment_id, worker_group_id')
+      .eq('worker_group_id', resolvedGroupId),
+    supabase
+      .from('worker_groups')
+      .select('id, name, color, shift_label')
+      .eq('id', resolvedGroupId)
+      .maybeSingle(),
+    report
+      ? Promise.resolve({ data: report, error: null })
+      : supabase
+          .from('daily_reports')
+          .select('*')
+          .eq('worker_group_id', resolvedGroupId)
+          .eq('report_date', resolvedDate)
+          .maybeSingle(),
+  ]);
+
+  if (rulesRes.error) throw rulesRes.error;
+  if (wgRes.error) throw wgRes.error;
+  if (reportRes.error) throw reportRes.error;
+
+  const rules = rulesRes.data || [];
+  const workerGroup = wgRes.data || null;
+  const finalReport = reportRes.data || null;
+
+  const dueRules = rules.filter(
+    (r) => expandRuleDueDates(r, resolvedDate, resolvedDate).length > 0
+  );
+  const dueRuleIds = dueRules.map((r) => r.id);
+
+  const logs =
+    dueRuleIds.length > 0
+      ? await (async () => {
+          const CHUNK = 200;
+          const all = [];
+          for (let i = 0; i < dueRuleIds.length; i += CHUNK) {
+            const { data, error } = await supabase
+              .from('task_logs')
+              .select('*')
+              .in('rule_id', dueRuleIds.slice(i, i + CHUNK))
+              .eq('due_date', resolvedDate);
+            if (error) throw error;
+            if (data) all.push(...data);
+          }
+          return all;
+        })()
+      : [];
+
+  const equipmentIds = [...new Set(dueRules.map((r) => r.equipment_id).filter(Boolean))];
+  const personIds = [
+    ...new Set(
+      [
+        ...logs.flatMap((l) => [l.done_by, l.approved_by, l.reviewed_by, l.issue_resolved_by]),
+        finalReport?.submitted_by,
+        finalReport?.reviewed_by,
+      ].filter(Boolean)
+    ),
+  ];
+
+  const [equipments, profiles] = await Promise.all([
+    fetchInChunks('equipment', 'id, name, area, unit_count, group_id, is_active', 'id', equipmentIds),
+    fetchInChunks('profiles', 'id, full_name', 'id', personIds),
+  ]);
+
+  const groupIds = [...new Set(equipments.map((e) => e.group_id).filter(Boolean))];
+  const groups = await fetchInChunks('groups', 'id, name, item_no, category_id', 'id', groupIds);
+
+  const categoryIds = [...new Set(groups.map((g) => g.category_id).filter(Boolean))];
+  const categories = await fetchInChunks('categories', 'id, code, name', 'id', categoryIds);
+
+  const eqMap = new Map(equipments.map((e) => [e.id, e]));
+  const grpMap = new Map(groups.map((g) => [g.id, g]));
+  const catMap = new Map(categories.map((c) => [c.id, c]));
+  const profilesMap = new Map(profiles.map((p) => [p.id, p.full_name]));
+  const logByRuleId = new Map(logs.map((l) => [l.rule_id, l]));
+
+  const tasks = dueRules.map((rule) => {
+    const equipment = rule.equipment_id ? eqMap.get(rule.equipment_id) || null : null;
+    const group = equipment?.group_id ? grpMap.get(equipment.group_id) || null : null;
+    const category = group?.category_id ? catMap.get(group.category_id) || null : null;
+    const log = logByRuleId.get(rule.id) || null;
+    return {
+      id: log?.id || `${rule.id}_${resolvedDate}`,
+      rule_id: rule.id,
+      due_date: resolvedDate,
+      frequency: rule.frequency,
+      rule,
+      equipment,
+      group,
+      category,
+      workerGroup,
+      log,
+      doneByName: log?.done_by ? profilesMap.get(log.done_by) || 'Worker' : null,
+      resolvedByName: log?.issue_resolved_by ? profilesMap.get(log.issue_resolved_by) || 'Admin' : null,
+    };
+  });
+
+  return {
+    report: finalReport,
+    groupId: resolvedGroupId,
+    reportDate: resolvedDate,
+    workerGroup,
+    tasks,
+    profilesMap,
+  };
 }
 
 export async function fetchTaskLogs(rangeStartOrRuleIds = null, rangeEnd = null) {

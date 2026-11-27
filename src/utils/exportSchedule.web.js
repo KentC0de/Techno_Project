@@ -622,6 +622,7 @@ export async function generateMasterScheduleWorkbook({
               const key = `${activeRule.id}_${day.dateStr}`;
               const log = logMap.get(key);
               const status = log ? log.status : 'pending';
+              const result = log ? log.result : null;
 
               // Day cells have NO text at all (no letters, no symbols); meaning is indicated by fill color only
               cell.value = '';
@@ -630,26 +631,33 @@ export async function generateMasterScheduleWorkbook({
                 cell.fill = DONE_FILL;
                 if (addNotes) {
                   const workerName = (log.done_by && profileMap?.get(log.done_by)) || 'Technician';
+                  const workerGroup = (log.worker_group_name || activeRule.worker_group?.name || activeRule.worker_group_name || 'Worker group');
                   const doneAt = log.done_at ? log.done_at.replace('T', ' ').substring(0, 16) : day.dateStr;
-                  let noteText = `Done by ${workerName} on ${doneAt}`;
-                  if (log.notes) noteText += `\nRemark: ${log.notes}`;
+                  const approverName = (log.approved_by && profileMap?.get(log.approved_by)) || (log.reviewed_by && profileMap?.get(log.reviewed_by)) || 'Admin';
+                  const approvedAt = (log.approved_at || log.reviewed_at) ? (log.approved_at || log.reviewed_at).replace('T', ' ').substring(0, 16) : doneAt;
+
+                  let noteText = `Done by ${workerName} (${workerGroup}) on ${doneAt} - approved by ${approverName} on ${approvedAt}`;
+                  if (result === 'issue' || log.notes) {
+                    noteText += `\nIssue: ${log.notes || 'Issue reported'}`;
+                  }
+                  if (log.photo_paths && log.photo_paths.length > 0) {
+                    noteText += `\nPhotos: ${log.photo_paths.length}`;
+                  }
                   cell.note = noteText;
                 }
-              } else if (status === 'issue') {
-                // Issue reported has NO fill (white); note only
+              } else if (result === 'issue') {
+                // Not done, but result is issue -> no fill; note with "(waiting approval)" if not done
                 if (addNotes) {
                   const workerName = (log.done_by && profileMap?.get(log.done_by)) || 'Technician';
-                  let noteText = `Issue: ${log.notes || 'Issue reported'}`;
+                  let noteText = `Issue: ${log.notes || 'Issue reported'} (waiting approval)`;
                   if (workerName) noteText += ` (${workerName})`;
+                  if (log.photo_paths && log.photo_paths.length > 0) {
+                    noteText += `\nPhotos: ${log.photo_paths.length}`;
+                  }
                   cell.note = noteText;
                 }
-              } else if (status === 'skipped') {
-                // Skipped has NO fill (white); note only
-                if (addNotes) {
-                  cell.note = log.notes ? `Skipped: ${log.notes}` : 'Skipped';
-                }
               }
-              // Scheduled, overdue, and days without a task have NO fill (white)
+              // draft / submitted / rejected / scheduled / overdue have NO fill (white)
             }
           });
         });
@@ -766,14 +774,14 @@ export async function generateMasterScheduleWorkbook({
     const legRow2 = ws.getRow(curRowIdx);
     legRow2.height = 18;
 
-    // Legend has ONE colored square (light green) with label "Done"
+    // Legend has ONE colored square (light green) with label "Approved (done)"
     const cDone = ws.getCell(curRowIdx, 4);
     cDone.value = '';
     cDone.fill = DONE_FILL;
     cDone.border = { top: borderThin, bottom: borderThin, left: borderThin, right: borderThin };
 
     const cDoneLbl = ws.getCell(curRowIdx, 5);
-    cDoneLbl.value = 'Done';
+    cDoneLbl.value = 'Approved (done)';
     cDoneLbl.font = { name: fontName, size: 10, bold: true };
   });
 

@@ -1,388 +1,178 @@
--- ==============================================================================
--- PREVENTIVE MAINTENANCE SCHEDULER: SUPABASE POSTGRESQL SCHEMA & SEED
--- ==============================================================================
--- Instructions:
--- 1. Open your Supabase Project Dashboard -> SQL Editor.
--- 2. Click "New Query", paste this entire script, and click "Run".
--- ==============================================================================
+-- WARNING: This schema is for context only and is not meant to be run.
+-- Table order and constraints may not be valid for execution.
 
--- 1. EXTENSIONS
-create extension if not exists "uuid-ossp";
-create extension if not exists "pgcrypto";
-
--- 2. DROP EXISTING TABLES (IF RE-INITIALIZING)
-drop table if exists task_logs cascade;
-drop table if exists schedule_rules cascade;
-drop table if exists equipment cascade;
-drop table if exists groups cascade;
-drop table if exists categories cascade;
-drop table if exists profiles cascade;
-
--- ==============================================================================
--- 3. TABLES DEFINITION
--- ==============================================================================
-
--- PROFILES (Linked to Supabase Auth users)
-create table profiles (
-  id uuid references auth.users(id) on delete cascade primary key,
-  full_name text not null,
-  role text not null check (role in ('admin', 'worker')) default 'worker',
-  created_at timestamptz default now() not null
+CREATE TABLE public.profiles (
+  id uuid NOT NULL,
+  full_name text NOT NULL,
+  role text NOT NULL DEFAULT 'worker'::text CHECK (role = ANY (ARRAY['admin'::text, 'worker'::text])),
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  status text NOT NULL DEFAULT 'active'::text CHECK (status = ANY (ARRAY['active'::text, 'disabled'::text])),
+  disabled_at timestamp with time zone,
+  disabled_by uuid,
+  disabled_reason text,
+  CONSTRAINT profiles_pkey PRIMARY KEY (id),
+  CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id),
+  CONSTRAINT profiles_disabled_by_fkey FOREIGN KEY (disabled_by) REFERENCES auth.users(id)
 );
-
--- CATEGORIES (A Inverter Station Area, B PV Field Area, C MV & LV System, D Other System)
-create table categories (
-  id uuid default gen_random_uuid() primary key,
-  code text not null unique,
-  name text not null,
-  sort_order int not null default 0
+CREATE TABLE public.categories (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  code text NOT NULL UNIQUE,
+  name text NOT NULL,
+  sort_order integer NOT NULL DEFAULT 0,
+  CONSTRAINT categories_pkey PRIMARY KEY (id)
 );
-
--- GROUPS (Under each category: Transformer, Inverter, PV Module Cleaning, etc.)
-create table groups (
-  id uuid default gen_random_uuid() primary key,
-  category_id uuid references categories(id) on delete cascade not null,
-  item_no int not null,
-  name text not null
+CREATE TABLE public.groups (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  category_id uuid NOT NULL,
+  item_no integer NOT NULL,
+  name text NOT NULL,
+  CONSTRAINT groups_pkey PRIMARY KEY (id),
+  CONSTRAINT groups_category_id_fkey FOREIGN KEY (category_id) REFERENCES public.categories(id)
 );
-
--- EQUIPMENT (Specific field equipment)
-create table equipment (
-  id uuid default gen_random_uuid() primary key,
-  group_id uuid references groups(id) on delete cascade not null,
-  name text not null,
-  area text check (area in ('Area 1', 'Area 2', 'Area 3') or area is null),
-  unit_count int not null default 1,
-  default_freq text[] default '{}'::text[] not null,
-  is_active boolean not null default true
+CREATE TABLE public.equipment (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  group_id uuid NOT NULL,
+  name text NOT NULL,
+  area text CHECK ((area = ANY (ARRAY['Area 1'::text, 'Area 2'::text, 'Area 3'::text])) OR area IS NULL),
+  unit_count integer NOT NULL DEFAULT 1,
+  default_freq ARRAY NOT NULL DEFAULT '{}'::text[],
+  is_active boolean NOT NULL DEFAULT true,
+  CONSTRAINT equipment_pkey PRIMARY KEY (id),
+  CONSTRAINT equipment_group_id_fkey FOREIGN KEY (group_id) REFERENCES public.groups(id)
 );
-
--- SCHEDULE RULES (d=daily, w=weekly, M=monthly, Q=quarterly, SA=semi-annual)
-create table schedule_rules (
-  id uuid default gen_random_uuid() primary key,
-  equipment_id uuid references equipment(id) on delete cascade not null,
-  frequency text not null check (frequency in ('d', 'w', 'M', 'Q', 'SA')),
-  start_date date not null,
+CREATE TABLE public.schedule_rules (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  equipment_id uuid NOT NULL,
+  frequency text NOT NULL CHECK (frequency = ANY (ARRAY['d'::text, 'w'::text, 'M'::text, 'Q'::text, 'SA'::text])),
+  start_date date NOT NULL,
   end_date date,
-  weekday int check (weekday between 1 and 7 or weekday is null), -- 1=Mon ... 7=Sun
+  weekday integer CHECK (weekday >= 1 AND weekday <= 7 OR weekday IS NULL),
   notes text,
-  created_by uuid references auth.users(id) on delete set null,
-  created_at timestamptz default now() not null
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  worker_group_id uuid,
+  CONSTRAINT schedule_rules_pkey PRIMARY KEY (id),
+  CONSTRAINT schedule_rules_equipment_id_fkey FOREIGN KEY (equipment_id) REFERENCES public.equipment(id),
+  CONSTRAINT schedule_rules_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id),
+  CONSTRAINT schedule_rules_worker_group_id_fkey FOREIGN KEY (worker_group_id) REFERENCES public.worker_groups(id)
 );
-
--- TASK LOGS (Completed, skipped, or issue records with unique constraint on rule_id + due_date)
-create table task_logs (
-  id uuid default gen_random_uuid() primary key,
-  rule_id uuid references schedule_rules(id) on delete cascade not null,
-  due_date date not null,
-  status text not null check (status in ('done', 'skipped', 'issue')),
+CREATE TABLE public.task_logs (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  rule_id uuid NOT NULL,
+  due_date date NOT NULL,
+  status text NOT NULL DEFAULT 'submitted'::text CHECK (status = ANY (ARRAY['submitted'::text, 'done'::text, 'rejected'::text, 'issue'::text, 'skipped'::text])),
   notes text,
-  done_by uuid references auth.users(id) on delete set null,
-  done_at timestamptz default now() not null,
-  constraint unique_rule_due_date unique (rule_id, due_date)
+  done_by uuid,
+  done_at timestamp with time zone NOT NULL DEFAULT now(),
+  submitted_at timestamp with time zone,
+  approved_by uuid,
+  approved_at timestamp with time zone,
+  reviewed_by uuid,
+  reviewed_at timestamp with time zone,
+  review_note text,
+  CONSTRAINT task_logs_pkey PRIMARY KEY (id),
+  CONSTRAINT task_logs_done_by_fkey FOREIGN KEY (done_by) REFERENCES auth.users(id),
+  CONSTRAINT task_logs_approved_by_fkey FOREIGN KEY (approved_by) REFERENCES auth.users(id),
+  CONSTRAINT task_logs_reviewed_by_fkey FOREIGN KEY (reviewed_by) REFERENCES auth.users(id),
+  CONSTRAINT task_logs_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.schedule_rules(id)
 );
-
--- ==============================================================================
--- 4. ROW LEVEL SECURITY (RLS) POLICIES
--- ==============================================================================
-
-alter table profiles enable row level security;
-alter table categories enable row level security;
-alter table groups enable row level security;
-alter table equipment enable row level security;
-alter table schedule_rules enable row level security;
-alter table task_logs enable row level security;
-
--- Helper function: check if currently authenticated user is admin
-create or replace function public.is_admin()
-returns boolean
-language sql
-security definer
-stable
-as $$
-  select exists (
-    select 1 from public.profiles
-    where id = auth.uid() and role = 'admin'
-  );
-$$;
-
--- PROFILES POLICIES
-create policy "Authenticated users can read all profiles"
-  on profiles for select
-  to authenticated
-  using (true);
-
-create policy "Users can update their own profile"
-  on profiles for update
-  to authenticated
-  using (id = auth.uid() or is_admin())
-  with check (id = auth.uid() or is_admin());
-
-create policy "Admins can insert profiles"
-  on profiles for insert
-  to authenticated
-  with check (id = auth.uid() or is_admin());
-
--- CATEGORIES POLICIES
-create policy "Authenticated users can read categories"
-  on categories for select
-  to authenticated
-  using (true);
-
-create policy "Admins can insert/update/delete categories"
-  on categories for all
-  to authenticated
-  using (is_admin())
-  with check (is_admin());
-
--- GROUPS POLICIES
-create policy "Authenticated users can read groups"
-  on groups for select
-  to authenticated
-  using (true);
-
-create policy "Admins can insert/update/delete groups"
-  on groups for all
-  to authenticated
-  using (is_admin())
-  with check (is_admin());
-
--- EQUIPMENT POLICIES
-create policy "Authenticated users can read equipment"
-  on equipment for select
-  to authenticated
-  using (true);
-
-create policy "Admins can insert/update/delete equipment"
-  on equipment for all
-  to authenticated
-  using (is_admin())
-  with check (is_admin());
-
--- SCHEDULE RULES POLICIES
-create policy "Authenticated users can read schedule rules"
-  on schedule_rules for select
-  to authenticated
-  using (true);
-
-create policy "Admins can insert/update/delete schedule rules"
-  on schedule_rules for all
-  to authenticated
-  using (is_admin())
-  with check (is_admin());
-
--- TASK LOGS POLICIES
-create policy "Authenticated users can read task logs"
-  on task_logs for select
-  to authenticated
-  using (true);
-
-create policy "Workers can insert/update their own task logs, admins can manage all"
-  on task_logs for insert
-  to authenticated
-  with check (done_by = auth.uid() or is_admin());
-
-create policy "Workers can update their own task logs"
-  on task_logs for update
-  to authenticated
-  using (done_by = auth.uid() or is_admin())
-  with check (done_by = auth.uid() or is_admin());
-
-create policy "Workers can delete (undo) their own task logs"
-  on task_logs for delete
-  to authenticated
-  using (done_by = auth.uid() or is_admin());
-
--- ==============================================================================
--- 5. AUTOMATIC PROFILE CREATION TRIGGER ON SIGNUP
--- ==============================================================================
-
-create or replace function public.handle_new_user()
-returns trigger
-language plpgsql
-security definer
-as $$
-begin
-  insert into public.profiles (id, full_name, role)
-  values (
-    new.id,
-    coalesce(new.raw_user_meta_data->>'full_name', split_part(new.email, '@', 1)),
-    coalesce(new.raw_user_meta_data->>'role', 'worker')
-  )
-  on conflict (id) do update set
-    full_name = excluded.full_name;
-  return new;
-end;
-$$;
-
-drop trigger if exists on_auth_user_created on auth.users;
-create trigger on_auth_user_created
-  after insert on auth.users
-  for each row execute function public.handle_new_user();
-
--- ==============================================================================
--- 6. SEED DATA (EXACT MASTER MAINTENANCE SCHEDULE)
--- ==============================================================================
-
--- A. CATEGORIES
-insert into categories (code, name, sort_order) values
-  ('A', 'Inverter Station Area', 1),
-  ('B', 'PV Field Area', 2),
-  ('C', 'MV & LV System', 3),
-  ('D', 'Other System', 4)
-on conflict (code) do nothing;
-
--- B. GROUPS
-do $$
-declare
-  cat_a uuid;
-  cat_b uuid;
-  cat_c uuid;
-  cat_d uuid;
-  grp_id uuid;
-  i int;
-begin
-  select id into cat_a from categories where code = 'A';
-  select id into cat_b from categories where code = 'B';
-  select id into cat_c from categories where code = 'C';
-  select id into cat_d from categories where code = 'D';
-
-  -- CATEGORY A GROUPS
-  insert into groups (category_id, item_no, name) values (cat_a, 1, 'Station RMU/ MV Switchgear') returning id into grp_id;
-  for i in 1..6 loop
-    insert into equipment (group_id, name, unit_count, default_freq, is_active)
-    values (grp_id, 'Station RMU/ MV Switchgear ' || i, 1, array['d', 'w', 'M'], true);
-  end loop;
-
-  insert into groups (category_id, item_no, name) values (cat_a, 2, 'Transformer') returning id into grp_id;
-  for i in 1..6 loop
-    insert into equipment (group_id, name, unit_count, default_freq, is_active)
-    values (grp_id, 'Transformer ' || i, 1, array['d', 'w', 'M'], true);
-  end loop;
-
-  insert into groups (category_id, item_no, name) values (cat_a, 3, 'Inverter') returning id into grp_id;
-  for i in 1..12 loop
-    insert into equipment (group_id, name, unit_count, default_freq, is_active)
-    values (grp_id, 'Inverter ' || i, 1, array['d', 'w', 'M'], true);
-  end loop;
-
-  insert into groups (category_id, item_no, name) values (cat_a, 4, 'Station Aux Power Supply Set-up') returning id into grp_id;
-  for i in 1..6 loop
-    insert into equipment (group_id, name, unit_count, default_freq, is_active)
-    values (grp_id, 'Station Aux Power Supply Set-up ' || i, 1, array['M'], true);
-  end loop;
-
-  insert into groups (category_id, item_no, name) values (cat_a, 5, 'Structure, Inverter Station') returning id into grp_id;
-  for i in 1..5 loop
-    insert into equipment (group_id, name, unit_count, default_freq, is_active)
-    values (grp_id, 'Structure, Inverter Station ' || i, 1, array[]::text[], true);
-  end loop;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active)
-  values (grp_id, 'Structure, Inverter Station 6', 1, array['Q'], true);
-
-  -- CATEGORY B GROUPS (PV FIELD AREA)
-  insert into groups (category_id, item_no, name) values (cat_b, 1, 'PV Module Cleaning') returning id into grp_id;
-  insert into equipment (group_id, name, area, unit_count, default_freq, is_active) values
-    (grp_id, 'PV Module Cleaning - Area 1', 'Area 1', 1, array['d'], true),
-    (grp_id, 'PV Module Cleaning - Area 2', 'Area 2', 1, array['d'], true),
-    (grp_id, 'PV Module Cleaning - Area 3', 'Area 3', 1, array['d'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_b, 2, 'Grass Cutting') returning id into grp_id;
-  insert into equipment (group_id, name, area, unit_count, default_freq, is_active) values
-    (grp_id, 'Grass Cutting - Area 1', 'Area 1', 1, array['w'], true),
-    (grp_id, 'Grass Cutting - Area 2', 'Area 2', 1, array['d'], true),
-    (grp_id, 'Grass Cutting - Area 3', 'Area 3', 1, array['w'], true),
-    (grp_id, 'Grass Cutting - Main Station', null, 1, array['w'], true),
-    (grp_id, 'Grass Cutting - Perimeter and Open Areas', null, 1, array['w'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_b, 3, 'PV Mod & Structure') returning id into grp_id;
-  insert into equipment (group_id, name, area, unit_count, default_freq, is_active) values
-    (grp_id, 'PV Mod & Structure - Area 1', 'Area 1', 1, array['M'], true),
-    (grp_id, 'PV Mod & Structure - Area 2', 'Area 2', 1, array['M'], true),
-    (grp_id, 'PV Mod & Structure - Area 3', 'Area 3', 1, array['M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_b, 4, 'PV Combiner Boxes') returning id into grp_id;
-  for i in 1..12 loop
-    insert into equipment (group_id, name, unit_count, default_freq, is_active)
-    values (
-      grp_id,
-      'DCB-E' || lpad(i::text, 2, '0') || ' x ' || (case when i in (7, 8) then '5' else '6' end),
-      case when i in (7, 8) then 5 else 6 end,
-      array['M'],
-      true
-    );
-  end loop;
-
-  insert into groups (category_id, item_no, name) values (cat_b, 5, 'Drainage System') returning id into grp_id;
-  insert into equipment (group_id, name, area, unit_count, default_freq, is_active) values
-    (grp_id, 'Drainage System - Area 1', 'Area 1', 1, array['w', 'M'], true),
-    (grp_id, 'Drainage System - Area 2', 'Area 2', 1, array['w', 'M'], true),
-    (grp_id, 'Drainage System - Area 3', 'Area 3', 1, array['w', 'M'], true);
-
-  -- CATEGORY C GROUPS (MV & LV SYSTEM)
-  insert into groups (category_id, item_no, name) values (cat_c, 1, 'Main Switchboard-34Kv') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Main Switchboard-34Kv', 1, array['d', 'M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_c, 2, 'Main Aux Switchboard-0.4Kv') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Main Aux Switchboard-0.4Kv', 1, array['d'], true),
-    (grp_id, 'Distribution Board Guard House Station', 1, array['w'], true),
-    (grp_id, 'Distribution Board Main Station Lighting', 1, array['w'], true),
-    (grp_id, 'Distribution Board Water Pump Station', 1, array['w'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_c, 3, 'Main Aux Transformer Bank') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Main Aux Transformer Bank', 1, array['M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_c, 4, 'Main Battery bank, charger and DC panel') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Main Battery bank, charger and DC panel', 1, array['d'], true);
-
-  -- CATEGORY D GROUPS (OTHER SYSTEM)
-  insert into groups (category_id, item_no, name) values (cat_d, 1, 'Aircon Setup') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Aircon Setup', 1, array['M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_d, 2, 'Building Structure') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Building Structure', 1, array['w'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_d, 3, 'CCTV Set-up') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'CCTV Set-up', 1, array['d'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_d, 4, 'Communication & Controller System') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Communication & Controller System', 1, array['d', 'w', 'M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_d, 5, 'Fire Fighting and Alarm Set-up') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Fire Fighting and Alarm Set-up', 1, array['d', 'M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_d, 6, 'Lighting Setup') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Lighting Setup', 1, array['M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_d, 7, 'Ventilation Setup') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Ventilation Setup', 1, array['M'], true);
-
-  insert into groups (category_id, item_no, name) values (cat_d, 8, 'Water Supply Setup') returning id into grp_id;
-  insert into equipment (group_id, name, unit_count, default_freq, is_active) values
-    (grp_id, 'Water Supply Setup', 1, array['d', 'w', 'M'], true);
-
-  -- INITIAL ACTIVE SCHEDULE RULES (Starting from current month)
-  insert into schedule_rules (equipment_id, frequency, start_date, weekday, notes)
-  select 
-    e.id,
-    f.freq,
-    current_date,
-    case when f.freq = 'w' then 1 else null end,
-    'Scheduled routine inspection'
-  from equipment e
-  cross join lateral unnest(e.default_freq) as f(freq)
-  where e.is_active = true and array_length(e.default_freq, 1) > 0;
-
-end $$;
-
+CREATE TABLE public.activity_logs (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  user_id uuid,
+  user_name text,
+  user_role text,
+  action text NOT NULL,
+  entity_type text,
+  entity_id text,
+  details jsonb NOT NULL DEFAULT '{}'::jsonb,
+  platform text,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  location text,
+  summary text,
+  CONSTRAINT activity_logs_pkey PRIMARY KEY (id),
+  CONSTRAINT activity_logs_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id)
+);
+CREATE TABLE public.app_settings (
+  id integer NOT NULL DEFAULT 1 CHECK (id = 1),
+  maintenance_mode boolean NOT NULL DEFAULT false,
+  maintenance_message text NOT NULL DEFAULT 'The app is under maintenance. Please come back later.'::text,
+  support_contact text,
+  updated_by uuid,
+  updated_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT app_settings_pkey PRIMARY KEY (id),
+  CONSTRAINT app_settings_updated_by_fkey FOREIGN KEY (updated_by) REFERENCES auth.users(id)
+);
+CREATE TABLE public.rule_assignments (
+  rule_id uuid NOT NULL,
+  user_id uuid NOT NULL,
+  assigned_by uuid,
+  assigned_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT rule_assignments_pkey PRIMARY KEY (rule_id, user_id),
+  CONSTRAINT rule_assignments_rule_id_fkey FOREIGN KEY (rule_id) REFERENCES public.schedule_rules(id),
+  CONSTRAINT rule_assignments_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.profiles(id),
+  CONSTRAINT rule_assignments_assigned_by_fkey FOREIGN KEY (assigned_by) REFERENCES auth.users(id)
+);
+CREATE TABLE public.worker_groups (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  name text NOT NULL,
+  description text,
+  color text NOT NULL DEFAULT '#0EA5E9'::text,
+  shift_label text,
+  shift_start time without time zone,
+  shift_end time without time zone,
+  work_days ARRAY NOT NULL DEFAULT '{1,2,3,4,5}'::integer[] CHECK (work_days <@ ARRAY[1, 2, 3, 4, 5, 6, 7]),
+  is_active boolean NOT NULL DEFAULT true,
+  created_by uuid,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT worker_groups_pkey PRIMARY KEY (id),
+  CONSTRAINT worker_groups_created_by_fkey FOREIGN KEY (created_by) REFERENCES auth.users(id)
+);
+CREATE TABLE public.worker_group_members (
+  user_id uuid NOT NULL,
+  group_id uuid NOT NULL,
+  added_by uuid,
+  added_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT worker_group_members_pkey PRIMARY KEY (user_id),
+  CONSTRAINT worker_group_members_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.profiles(id),
+  CONSTRAINT worker_group_members_group_id_fkey FOREIGN KEY (group_id) REFERENCES public.worker_groups(id),
+  CONSTRAINT worker_group_members_added_by_fkey FOREIGN KEY (added_by) REFERENCES auth.users(id)
+);
+CREATE TABLE public._bak_groups (
+  id uuid,
+  category_id uuid,
+  item_no integer,
+  name text
+);
+CREATE TABLE public._bak_equipment (
+  id uuid,
+  group_id uuid,
+  name text,
+  area text,
+  unit_count integer,
+  default_freq ARRAY,
+  is_active boolean
+);
+CREATE TABLE public._bak_rules (
+  id uuid,
+  equipment_id uuid,
+  frequency text,
+  start_date date,
+  end_date date,
+  weekday integer,
+  notes text,
+  created_by uuid,
+  created_at timestamp with time zone,
+  worker_group_id uuid
+);
+CREATE TABLE public.notifications (
+  id uuid NOT NULL DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  type text NOT NULL,
+  title text NOT NULL,
+  body text,
+  data jsonb NOT NULL DEFAULT '{}'::jsonb,
+  read_at timestamp with time zone,
+  created_at timestamp with time zone NOT NULL DEFAULT now(),
+  CONSTRAINT notifications_pkey PRIMARY KEY (id),
+  CONSTRAINT notifications_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id)
+);

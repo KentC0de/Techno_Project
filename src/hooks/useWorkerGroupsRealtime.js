@@ -33,6 +33,8 @@ export function useWorkerGroupsRealtime({ workerUserId = null } = {}) {
         queryClient.invalidateQueries({ queryKey: ['schedule_rules'] });
         queryClient.invalidateQueries({ queryKey: ['schedule_rules_all'] });
         queryClient.invalidateQueries({ queryKey: ['calendar_tasks'] });
+        queryClient.invalidateQueries({ queryKey: ['approvals'] });
+        queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
       }, 500);
     };
 

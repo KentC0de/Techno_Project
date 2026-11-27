@@ -515,7 +515,7 @@ export default function ExportScheduleModal({ visible, onClose, initialPeriodTyp
             <View style={styles.summaryCallout}>
               <Ionicons name="stats-chart" size={18} color={colors.primary} />
               <Text style={styles.summaryText}>
-                {`${summary.weeks} work week${summary.weeks === 1 ? '' : 's'} • ${summary.rows} rows • ${summary.done} done (approved), ${summary.waiting} waiting for approval / ${summary.due} due (${summary.rate}%)`}
+                {`${summary.weeks} work week${summary.weeks === 1 ? '' : 's'} • ${summary.rows} rows • ${summary.done} done (approved), ${summary.waiting} waiting for review / ${summary.due} due (${summary.rate}%)`}
               </Text>
             </View>
           </ScrollView>

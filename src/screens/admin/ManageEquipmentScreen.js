@@ -124,6 +124,8 @@ export default function ManageEquipmentScreen({ navigation }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['equipment_all'] });
       queryClient.invalidateQueries({ queryKey: ['equipment'] });
+      queryClient.invalidateQueries({ queryKey: ['approvals'] });
+      queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
       setEqModalVisible(false);
     },
   });
@@ -133,6 +135,8 @@ export default function ManageEquipmentScreen({ navigation }) {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['equipment_all'] });
       queryClient.invalidateQueries({ queryKey: ['equipment'] });
+      queryClient.invalidateQueries({ queryKey: ['approvals'] });
+      queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
     },
   });
 
@@ -382,6 +386,8 @@ export default function ManageEquipmentScreen({ navigation }) {
       onSuccess: () => {
         queryClient.invalidateQueries({ queryKey: ['equipment_all'] });
         queryClient.invalidateQueries({ queryKey: ['equipment'] });
+        queryClient.invalidateQueries({ queryKey: ['approvals'] });
+        queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
         setEqModalVisible(false);
       },
     });
@@ -406,6 +412,8 @@ export default function ManageEquipmentScreen({ navigation }) {
       onSuccess: () => {
         queryClient.invalidateQueries({ queryKey: ['equipment_all'] });
         queryClient.invalidateQueries({ queryKey: ['equipment'] });
+        queryClient.invalidateQueries({ queryKey: ['approvals'] });
+        queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
       },
     });
   };

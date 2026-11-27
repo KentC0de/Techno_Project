@@ -11,10 +11,11 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../theme';
+import PhotoPicker from './PhotoPicker';
 
 export default function TaskActionModal({
   visible,
-  actionType = 'done', // 'done' | 'issue' | 'skipped'
+  actionType = 'issue', // 'completed' | 'issue'
   task = null,
   onClose,
   onSubmit,
@@ -22,22 +23,11 @@ export default function TaskActionModal({
   const [note, setNote] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [photos, setPhotos] = useState([]);
 
   const isIssue = actionType === 'issue';
-  const isDone = actionType === 'done';
-  const isSkipped = actionType === 'skipped';
-
-  const title = isDone
-    ? 'Mark Task as Done'
-    : isIssue
-    ? 'Report Issue on Equipment'
-    : 'Skip Task';
-
-  const actionColor = isIssue
-    ? colors.danger
-    : isDone
-    ? colors.primary
-    : colors.textSecondary;
+  const title = isIssue ? 'Report Issue on Equipment' : 'Mark Task as Completed';
+  const actionColor = isIssue ? '#D97706' : colors.primary;
 
   const handleConfirm = async () => {
     if (isIssue && !note.trim()) {
@@ -48,8 +38,9 @@ export default function TaskActionModal({
     try {
       setLoading(true);
       setError('');
-      await onSubmit(actionType, note.trim());
+      await onSubmit(actionType, note.trim(), photos);
       setNote('');
+      setPhotos([]);
       onClose();
     } catch (err) {
       setError(err.message || 'Failed to update task.');
@@ -60,6 +51,7 @@ export default function TaskActionModal({
 
   const handleCancel = () => {
     setNote('');
+    setPhotos([]);
     setError('');
     onClose();
   };
@@ -77,13 +69,7 @@ export default function TaskActionModal({
           <View style={styles.header}>
             <View style={styles.titleRow}>
               <Ionicons
-                name={
-                  isDone
-                    ? 'checkmark-circle'
-                    : isIssue
-                    ? 'alert-circle'
-                    : 'close-circle'
-                }
+                name={isIssue ? 'alert-circle' : 'checkmark-circle'}
                 size={22}
                 color={actionColor}
                 style={{ marginRight: 8 }}
@@ -137,6 +123,16 @@ export default function TaskActionModal({
             {error ? <Text style={styles.errorText}>{error}</Text> : null}
           </View>
 
+          {task?.rule_id && task?.due_date ? (
+            <PhotoPicker
+              paths={photos}
+              onChange={setPhotos}
+              ruleId={task.rule_id}
+              dueDate={task.due_date}
+              disabled={loading}
+            />
+          ) : null}
+
           {/* Action Buttons */}
           <View style={styles.buttonRow}>
             <TouchableOpacity
@@ -156,7 +152,7 @@ export default function TaskActionModal({
                 <ActivityIndicator color={colors.white} size="small" />
               ) : (
                 <Text style={styles.confirmBtnText}>
-                  {isIssue ? 'Submit Issue' : isDone ? 'Confirm Done' : 'Confirm Skip'}
+                  {isIssue ? 'Submit Issue' : 'Confirm Completed'}
                 </Text>
               )}
             </TouchableOpacity>

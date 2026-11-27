@@ -16,7 +16,7 @@ import { useAuth } from '../context/AuthContext';
 import { useSidebar } from '../context/SidebarContext';
 import { useSystemFilter } from '../context/SystemFilterContext';
 import { useAction } from '../hooks/useAction';
-import { usePendingApprovals } from '../hooks/usePendingApprovals';
+import { useSubmittedReportsCount } from '../hooks/useSubmittedReportsCount';
 import { fetchScheduleRules, fetchTaskLogs } from '../lib/dataService';
 import {
   formatDate,
@@ -29,6 +29,8 @@ import { colors } from '../theme';
 
 const ROUTE_LABELS = {
   AdminCalendar: 'Schedule Calendar • Solar PM Hub',
+  ReportsList: 'Reports • Solar PM Hub',
+  ReportDetail: 'Report Detail • Solar PM Hub',
   SetSchedule: 'Set Schedule • Solar PM Hub',
   AssignWorkers: 'Assign Workers • Solar PM Hub',
   ManageEquipment: 'Equipment & Systems • Solar PM Hub',
@@ -91,7 +93,7 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
     staleTime: 60 * 1000,
   });
 
-  const { count: pendingApprovalsCount } = usePendingApprovals({ enabled: isAdmin });
+  const { count: submittedReportsCount } = useSubmittedReportsCount({ enabled: isAdmin });
 
   // Today's due tasks & Overdue tasks count
   const { todayDueCount, overdueCount, weekPerformanceRate } = useMemo(() => {
@@ -139,9 +141,8 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
       key: 'AdminCalendar',
       label: 'Schedule Calendar',
       icon: 'calendar-outline',
-      badge: pendingApprovalsCount > 0 ? (pendingApprovalsCount > 99 ? '99+' : pendingApprovalsCount) : null,
+      badge: submittedReportsCount > 0 ? (submittedReportsCount > 99 ? '99+' : submittedReportsCount) : null,
       badgeColor: '#0EA5E9',
-      navigateParams: { tab: 'approval' },
     },
     {
       key: 'AssignWorkers',

@@ -2,8 +2,17 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { colors } from '../theme';
 
+const FREQ_KEY_MAP = {
+  d: 'd',
+  w: 'w',
+  m: 'M',
+  q: 'Q',
+  sa: 'SA',
+};
+
 export default function FrequencyBadge({ freq, size = 'medium' }) {
-  const config = colors.frequency[freq] || {
+  const normalizedKey = freq ? FREQ_KEY_MAP[String(freq).trim().toLowerCase()] || freq : null;
+  const config = (normalizedKey && colors.frequency[normalizedKey]) || {
     code: freq ? String(freq).toUpperCase() : '?',
     label: freq || 'Unknown',
     bg: '#F1F5F9',

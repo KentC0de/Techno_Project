@@ -197,19 +197,25 @@ export default function PerformanceScreen({ navigation }) {
               </View>
 
               <View style={styles.metricCard}>
+                <Ionicons name="checkmark-done-outline" size={24} color={colors.primary} />
+                <Text style={styles.metricVal}>{overallPerf.completed + overallPerf.issue}</Text>
+                <Text style={styles.metricLabel}>Completed, not yet reported</Text>
+              </View>
+
+              <View style={styles.metricCard}>
                 <Ionicons name="time" size={24} color="#0284C7" />
                 <Text style={styles.metricVal}>{overallPerf.waiting}</Text>
-                <Text style={styles.metricLabel}>Waiting for approval</Text>
+                <Text style={styles.metricLabel}>Waiting for review</Text>
               </View>
 
               <View style={styles.metricCard}>
                 <Ionicons name="close-circle" size={24} color="#DC2626" />
-                <Text style={styles.metricVal}>{overallPerf.rejected}</Text>
-                <Text style={styles.metricLabel}>Rejected</Text>
+                <Text style={styles.metricVal}>{overallPerf.returned}</Text>
+                <Text style={styles.metricLabel}>Returned</Text>
               </View>
 
               <View style={styles.metricCard}>
-                <Ionicons name="alert-circle" size={24} color={colors.danger} />
+                <Ionicons name="alert-circle" size={24} color="#D97706" />
                 <Text style={styles.metricVal}>{issueTasks.length}</Text>
                 <Text style={styles.metricLabel}>Issues Reported</Text>
               </View>
@@ -218,12 +224,6 @@ export default function PerformanceScreen({ navigation }) {
                 <Ionicons name="time" size={24} color={colors.warning} />
                 <Text style={styles.metricVal}>{overdueTasks.length}</Text>
                 <Text style={styles.metricLabel}>Overdue Tasks</Text>
-              </View>
-
-              <View style={styles.metricCard}>
-                <Ionicons name="play-forward" size={24} color={colors.textSecondary} />
-                <Text style={styles.metricVal}>{overallPerf.skipped}</Text>
-                <Text style={styles.metricLabel}>Skipped Tasks</Text>
               </View>
             </View>
 

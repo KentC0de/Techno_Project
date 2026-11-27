@@ -7,7 +7,6 @@ import {
   ScrollView,
   TextInput,
   ActivityIndicator,
-  Alert,
   Platform,
   StatusBar as RNStatusBar,
 } from 'react-native';
@@ -15,10 +14,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAuth } from '../../context/AuthContext';
 import { supabase, isConfigured } from '../../lib/supabase';
-import { getSavedWorkerSelection, fetchScheduleRules } from '../../lib/dataService';
-import WorkerGroupBadge from '../../components/WorkerGroupBadge';
 import { useWorkerGroups } from '../../hooks/useWorkerGroups';
+import { useConnectionStatus } from '../../context/ConnectionStatusContext';
+import { useNotificationsContext } from '../../context/NotificationsProvider';
+import WorkerNotificationsModal from '../../components/WorkerNotificationsModal';
 import { useAction } from '../../hooks/useAction';
+import { a11yRole } from '../../utils/a11y';
 import { colors } from '../../theme';
 
 export default function ProfileScreen({ navigation }) {
@@ -30,12 +31,13 @@ export default function ProfileScreen({ navigation }) {
 
   const { user, signOut, refreshUser } = useAuth();
   const runAction = useAction();
-  const isAdmin = user?.role === 'admin';
+  const { status: connStatus } = useConnectionStatus();
+  const { unreadCount: workerUnreadNotifs } = useNotificationsContext();
+  const [notifModalVisible, setNotifModalVisible] = useState(false);
 
-  const { groups: workerGroupsList, groupByUser, taskCountByGroup } = useWorkerGroups();
+  const { groups: workerGroupsList, groupByUser } = useWorkerGroups();
   const myGroupId = user?.id ? groupByUser[user.id] : null;
   const myGroup = myGroupId ? workerGroupsList.find((g) => g.id === myGroupId) : null;
-  const myGroupTasksCount = myGroupId ? (taskCountByGroup[myGroupId] || 0) : 0;
 
   // Edit Name
   const [editingName, setEditingName] = useState(false);
@@ -49,23 +51,14 @@ export default function ProfileScreen({ navigation }) {
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordNotice, setPasswordNotice] = useState('');
 
-  // Selected Station
-  const [workerSelection, setWorkerSelection] = useState(null);
-
-  // Activity Logs
+  // Activity Sheet
+  const [showActivitySheet, setShowActivitySheet] = useState(false);
   const [userLogs, setUserLogs] = useState([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
   useEffect(() => {
     setFullName(user?.full_name || '');
-    loadWorkerStation();
-    loadUserActivity();
   }, [user]);
-
-  const loadWorkerStation = async () => {
-    const saved = await getSavedWorkerSelection();
-    setWorkerSelection(saved);
-  };
 
   const loadUserActivity = async () => {
     if (!isConfigured || !supabase || !user?.id) return;
@@ -95,14 +88,14 @@ export default function ProfileScreen({ navigation }) {
 
     runAction({
       confirm: {
-        title: 'Update Display Name?',
-        message: `Change profile name to "${fullName.trim()}"?`,
-        confirmText: 'Save Name',
+        title: 'Save Name?',
+        message: `Change name to "${fullName.trim()}"?`,
+        confirmText: 'Save',
         cancelText: 'Cancel',
         tone: 'default',
         icon: 'person-outline',
       },
-      loading: 'Saving profile name...',
+      loading: 'Saving name...',
       action: async () => {
         if (isConfigured && supabase) {
           const { error } = await supabase
@@ -114,7 +107,7 @@ export default function ProfileScreen({ navigation }) {
           await refreshUser();
         }
       },
-      success: 'Profile name updated successfully',
+      success: 'Profile name updated',
       onSuccess: () => {
         setEditingName(false);
       },
@@ -124,7 +117,7 @@ export default function ProfileScreen({ navigation }) {
   const handleUpdatePassword = () => {
     setPasswordNotice('');
     if (newPassword.length < 8) {
-      setPasswordNotice('Password must be at least 8 characters.');
+      setPasswordNotice('Password must be at least 8 chars.');
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -135,8 +128,8 @@ export default function ProfileScreen({ navigation }) {
     runAction({
       confirm: {
         title: 'Change Password?',
-        message: 'Are you sure you want to update your login password?',
-        confirmText: 'Update Password',
+        message: 'Update your login password?',
+        confirmText: 'Update',
         cancelText: 'Cancel',
         tone: 'default',
         icon: 'key-outline',
@@ -148,7 +141,7 @@ export default function ProfileScreen({ navigation }) {
           if (error) throw error;
         }
       },
-      success: 'Password updated successfully',
+      success: 'Password updated',
       onSuccess: () => {
         setShowPasswordModal(false);
         setNewPassword('');
@@ -161,9 +154,9 @@ export default function ProfileScreen({ navigation }) {
     runAction({
       confirm: {
         title: 'Sign Out?',
-        message: 'Are you sure you want to sign out of your account?',
+        message: 'Are you sure you want to sign out?',
         confirmText: 'Sign Out',
-        cancelText: 'Stay signed in',
+        cancelText: 'Stay',
         tone: 'danger',
         icon: 'log-out-outline',
       },
@@ -171,7 +164,7 @@ export default function ProfileScreen({ navigation }) {
       action: async () => {
         await signOut();
       },
-      success: 'Signed out successfully',
+      success: 'Signed out',
     });
   };
 
@@ -182,24 +175,43 @@ export default function ProfileScreen({ navigation }) {
     return name.slice(0, 2).toUpperCase();
   };
 
+  const getStatusColor = () => {
+    if (connStatus === 'connected') return '#10B981';
+    if (connStatus === 'checking') return '#F59E0B';
+    return '#EF4444';
+  };
+
   return (
     <View style={styles.screen}>
-      {/* Slim Header */}
-      <View style={[styles.topBar, { paddingTop: topInset + 6, height: topInset + 52 }]}>
-        <View style={styles.topBarLeft}>
-          <View style={styles.sunLogo}>
-            <Ionicons name="person" size={16} color={colors.white} />
-          </View>
-          <Text style={styles.topBarTitle}>Technician Profile</Text>
+      {/* Top Bar: left = Screen title "Profile", right = Bell + connection dot */}
+      <View style={[styles.topBar, { paddingTop: topInset + 6, height: topInset + 50 }]}>
+        <Text style={styles.topBarTitle}>Profile</Text>
+
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          <View style={[styles.statusDot, { backgroundColor: getStatusColor() }]} />
+
+          <TouchableOpacity
+            style={styles.bellTouch}
+            onPress={() => setNotifModalVisible(true)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel="Notifications"
+          >
+            <Ionicons name="notifications-outline" size={20} color={colors.white} />
+            {workerUnreadNotifs > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>
+                  {workerUnreadNotifs > 99 ? '99+' : workerUnreadNotifs}
+                </Text>
+              </View>
+            )}
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity onPress={handleConfirmSignOut} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-          <Ionicons name="log-out-outline" size={20} color="#EF4444" />
-        </TouchableOpacity>
       </View>
 
       <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-        {/* Profile Card */}
-        <View style={styles.profileCard}>
+        {/* Avatar + Name card */}
+        <View style={styles.userCard}>
           <View style={styles.avatarBox}>
             <Text style={styles.avatarInitials}>{getInitials(user?.full_name)}</Text>
           </View>
@@ -218,6 +230,7 @@ export default function ProfileScreen({ navigation }) {
                 style={styles.saveNameBtn}
                 onPress={handleSaveName}
                 disabled={savingName}
+                {...a11yRole('button')}
               >
                 {savingName ? (
                   <ActivityIndicator size="small" color={colors.white} />
@@ -231,6 +244,7 @@ export default function ProfileScreen({ navigation }) {
                   setFullName(user?.full_name || '');
                   setEditingName(false);
                 }}
+                {...a11yRole('button')}
               >
                 <Ionicons name="close" size={18} color={colors.dark} />
               </TouchableOpacity>
@@ -240,106 +254,56 @@ export default function ProfileScreen({ navigation }) {
               style={styles.nameRow}
               onPress={() => setEditingName(true)}
               activeOpacity={0.7}
+              {...a11yRole('button')}
             >
-              <Text style={styles.userName}>{user?.full_name || 'Technician'}</Text>
+              <Text style={styles.userName}>{user?.full_name || 'Worker'}</Text>
               <Ionicons name="pencil" size={16} color={colors.primary} style={{ marginLeft: 6 }} />
             </TouchableOpacity>
           )}
 
-          <Text style={styles.userEmail}>{user?.email || 'N/A'}</Text>
+          <Text style={styles.userEmail}>{user?.email || ''}</Text>
+        </View>
 
-          <View style={styles.roleBadge}>
-            <Text style={styles.roleText}>{isAdmin ? 'ADMINISTRATOR' : 'FIELD WORKER'}</Text>
+        {/* Card: "Group A - Day shift" */}
+        <View style={styles.groupCard}>
+          <Ionicons name="people" size={20} color={colors.primary} style={{ marginRight: 10 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.groupCardTitle}>
+              {myGroup?.name || 'No Group Assigned'}
+            </Text>
+            {myGroup?.shift_label ? (
+              <Text style={styles.groupCardSub}>{myGroup.shift_label}</Text>
+            ) : null}
           </View>
         </View>
 
-        {/* Worker Group Information */}
-        {!isAdmin && (
-          <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Worker Group & Shift</Text>
-            {myGroup ? (
-              <View style={{ gap: 8 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <WorkerGroupBadge group={myGroup} />
-                  <Text style={styles.groupTasksCountBadge}>
-                    {myGroupTasksCount} {myGroupTasksCount === 1 ? 'task' : 'tasks'} assigned
-                  </Text>
-                </View>
-
-                {myGroup.description && (
-                  <Text style={styles.groupDescText}>{myGroup.description}</Text>
-                )}
-
-                {myGroup.shift_start && myGroup.shift_end && (
-                  <View style={styles.groupMetaRow}>
-                    <Ionicons name="time-outline" size={16} color={colors.primary} />
-                    <Text style={styles.groupMetaText}>
-                      Shift: {myGroup.shift_label ? `${myGroup.shift_label} • ` : ''}
-                      {myGroup.shift_start.slice(0, 5)} - {myGroup.shift_end.slice(0, 5)}
-                    </Text>
-                  </View>
-                )}
-
-                {myGroup.work_days && myGroup.work_days.length > 0 && (
-                  <View style={styles.groupMetaRow}>
-                    <Ionicons name="calendar-outline" size={16} color={colors.primary} />
-                    <Text style={styles.groupMetaText}>
-                      Work Days: {myGroup.work_days.map((d) => ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'][d-1]).join(', ')}
-                    </Text>
-                  </View>
-                )}
-              </View>
-            ) : (
-              <View style={styles.noGroupProfileBox}>
-                <Ionicons name="people-outline" size={24} color={colors.textMuted} />
-                <Text style={styles.noGroupProfileText}>
-                  You are not currently assigned to a worker group. Contact your administrator.
-                </Text>
+        {/* Simple Rows: Notifications, Change password, Activity, Sign out */}
+        <View style={styles.menuCard}>
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={() => setNotifModalVisible(true)}
+            activeOpacity={0.7}
+            {...a11yRole('button')}
+          >
+            <Ionicons name="notifications-outline" size={20} color={colors.textPrimary} style={{ marginRight: 12 }} />
+            <Text style={styles.menuItemText}>Notifications</Text>
+            {workerUnreadNotifs > 0 && (
+              <View style={styles.menuItemBadge}>
+                <Text style={styles.menuItemBadgeText}>{workerUnreadNotifs}</Text>
               </View>
             )}
-          </View>
-        )}
+            <Ionicons name="chevron-forward" size={16} color={colors.textSecondary} />
+          </TouchableOpacity>
 
-        {/* Assigned System / Station */}
-        {!isAdmin && (
-          <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Current Assignment</Text>
-            <View style={styles.stationRow}>
-              <Ionicons name="navigate-outline" size={20} color={colors.primary} />
-              <View style={{ marginLeft: 12, flex: 1 }}>
-                <Text style={styles.stationLabel}>Assigned Work Station</Text>
-                <Text style={styles.stationVal}>
-                  {workerSelection?.categoryName || 'All Systems'}
-                  {workerSelection?.area && workerSelection.area !== 'All'
-                    ? ` • ${workerSelection.area}`
-                    : ''}
-                </Text>
-              </View>
-              <TouchableOpacity
-                style={styles.changeStationBtn}
-                onPress={() => navigation.navigate('ChooseWorkTab')}
-              >
-                <Text style={styles.changeStationText}>Switch</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        )}
-
-        {/* Password & Security */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Security & Account</Text>
           <TouchableOpacity
-            style={styles.menuRow}
+            style={styles.menuItem}
             onPress={() => setShowPasswordModal(!showPasswordModal)}
             activeOpacity={0.7}
+            {...a11yRole('button')}
           >
-            <Ionicons name="lock-closed-outline" size={20} color={colors.dark} />
-            <Text style={styles.menuRowText}>Change Password</Text>
-            <Ionicons
-              name={showPasswordModal ? 'chevron-up' : 'chevron-down'}
-              size={18}
-              color={colors.textMuted}
-            />
+            <Ionicons name="lock-closed-outline" size={20} color={colors.textPrimary} style={{ marginRight: 12 }} />
+            <Text style={styles.menuItemText}>Change Password</Text>
+            <Ionicons name={showPasswordModal ? 'chevron-up' : 'chevron-forward'} size={16} color={colors.textSecondary} />
           </TouchableOpacity>
 
           {showPasswordModal && (
@@ -349,7 +313,7 @@ export default function ProfileScreen({ navigation }) {
               ) : null}
               <TextInput
                 style={styles.passwordInput}
-                placeholder="New Password (min 8 chars)"
+                placeholder="New password (8+ chars)"
                 placeholderTextColor={colors.textMuted}
                 secureTextEntry
                 value={newPassword}
@@ -357,7 +321,7 @@ export default function ProfileScreen({ navigation }) {
               />
               <TextInput
                 style={styles.passwordInput}
-                placeholder="Confirm New Password"
+                placeholder="Confirm password"
                 placeholderTextColor={colors.textMuted}
                 secureTextEntry
                 value={confirmPassword}
@@ -367,56 +331,74 @@ export default function ProfileScreen({ navigation }) {
                 style={styles.updatePasswordBtn}
                 onPress={handleUpdatePassword}
                 disabled={savingPassword}
+                {...a11yRole('button')}
               >
                 {savingPassword ? (
                   <ActivityIndicator size="small" color={colors.white} />
                 ) : (
-                  <Text style={styles.updatePasswordText}>Save New Password</Text>
+                  <Text style={styles.updatePasswordText}>Save Password</Text>
                 )}
               </TouchableOpacity>
             </View>
           )}
 
-          <TouchableOpacity style={styles.menuRow} onPress={handleConfirmSignOut} activeOpacity={0.7}>
-            <Ionicons name="log-out-outline" size={20} color="#DC2626" />
-            <Text style={[styles.menuRowText, { color: '#DC2626', fontWeight: '700' }]}>
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={() => {
+              setShowActivitySheet(!showActivitySheet);
+              if (!showActivitySheet && userLogs.length === 0) {
+                loadUserActivity();
+              }
+            }}
+            activeOpacity={0.7}
+            {...a11yRole('button')}
+          >
+            <Ionicons name="time-outline" size={20} color={colors.textPrimary} style={{ marginRight: 12 }} />
+            <Text style={styles.menuItemText}>Activity</Text>
+            <Ionicons name={showActivitySheet ? 'chevron-up' : 'chevron-forward'} size={16} color={colors.textSecondary} />
+          </TouchableOpacity>
+
+          {showActivitySheet && (
+            <View style={styles.activityBox}>
+              {loadingLogs ? (
+                <ActivityIndicator size="small" color={colors.primary} style={{ marginVertical: 12 }} />
+              ) : userLogs.length === 0 ? (
+                <Text style={styles.emptyText}>No recent activity</Text>
+              ) : (
+                userLogs.slice(0, 10).map((log) => (
+                  <View key={log.id} style={styles.activityRow}>
+                    <View style={styles.activityDot} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.activityAction} numberOfLines={1}>{log.action}</Text>
+                      <Text style={styles.activityTime}>{new Date(log.created_at).toLocaleDateString()}</Text>
+                    </View>
+                  </View>
+                ))
+              )}
+            </View>
+          )}
+
+          <TouchableOpacity
+            style={[styles.menuItem, { borderBottomWidth: 0 }]}
+            onPress={handleConfirmSignOut}
+            activeOpacity={0.7}
+            {...a11yRole('button')}
+          >
+            <Ionicons name="log-out-outline" size={20} color={colors.danger} style={{ marginRight: 12 }} />
+            <Text style={[styles.menuItemText, { color: colors.danger, fontWeight: '700' }]}>
               Sign Out
             </Text>
           </TouchableOpacity>
         </View>
 
-        {/* My Activity (Last 30 entries) */}
-        <View style={styles.sectionCard}>
-          <View style={styles.activityHeaderRow}>
-            <Text style={styles.sectionTitle}>My Activity (Recent 30)</Text>
-            <TouchableOpacity onPress={loadUserActivity} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Ionicons name="refresh" size={16} color={colors.primary} />
-            </TouchableOpacity>
-          </View>
-
-          {loadingLogs ? (
-            <ActivityIndicator size="small" color={colors.primary} style={{ marginVertical: 14 }} />
-          ) : userLogs.length === 0 ? (
-            <Text style={styles.emptyActivityText}>No recorded activity logs yet.</Text>
-          ) : (
-            userLogs.map((log) => {
-              const d = new Date(log.created_at);
-              return (
-                <View key={log.id} style={styles.activityItem}>
-                  <View style={styles.activityDot} />
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.activityAction}>{log.action}</Text>
-                    <Text style={styles.activityTime}>{d.toLocaleString()}</Text>
-                  </View>
-                </View>
-              );
-            })
-          )}
-        </View>
-
-        {/* App Version */}
-        <Text style={styles.versionText}>Solar PM Maintenance Hub • v1.0.0</Text>
+        <Text style={styles.versionText}>Solar PM • v1.0</Text>
       </ScrollView>
+
+      {/* Notifications Modal */}
+      <WorkerNotificationsModal
+        visible={notifModalVisible}
+        onClose={() => setNotifModalVisible(false)}
+      />
     </View>
   );
 }
@@ -428,253 +410,212 @@ const styles = StyleSheet.create({
   },
   topBar: {
     backgroundColor: colors.dark,
-    paddingHorizontal: 20,
+    paddingHorizontal: 16,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     borderBottomWidth: 1,
     borderBottomColor: '#262626',
   },
-  topBarLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  sunLogo: {
-    width: 28,
-    height: 28,
-    borderRadius: 8,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 10,
-  },
   topBarTitle: {
-    fontSize: 16,
-    fontWeight: '800',
+    fontSize: 18,
+    fontWeight: '700',
     color: colors.white,
+  },
+  statusDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  bellTouch: {
+    padding: 6,
+    position: 'relative',
+  },
+  bellBadge: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    backgroundColor: colors.danger,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  bellBadgeText: {
+    color: colors.white,
+    fontSize: 9,
+    fontWeight: '700',
   },
   content: {
-    padding: 20,
-    paddingBottom: 40,
+    padding: 16,
+    gap: 12,
   },
-  profileCard: {
+  userCard: {
     backgroundColor: colors.white,
-    borderRadius: 20,
-    padding: 24,
-    alignItems: 'center',
-    marginBottom: 16,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.border,
+    padding: 20,
+    alignItems: 'center',
   },
   avatarBox: {
-    width: 72,
-    height: 72,
-    borderRadius: 36,
-    backgroundColor: colors.primary,
-    alignItems: 'center',
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: '#E0F2FE',
     justifyContent: 'center',
-    marginBottom: 14,
+    alignItems: 'center',
+    marginBottom: 10,
   },
   avatarInitials: {
-    fontSize: 24,
+    fontSize: 22,
     fontWeight: '800',
-    color: colors.white,
+    color: colors.primary,
   },
   nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 4,
   },
   userName: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: colors.dark,
+    fontSize: 18,
+    fontWeight: '700',
+    color: colors.textPrimary,
   },
   userEmail: {
-    fontSize: 14,
-    color: colors.textMuted,
-    marginBottom: 12,
-  },
-  roleBadge: {
-    backgroundColor: '#0A0A0A',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
-    borderRadius: 12,
-  },
-  roleText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: colors.white,
-    letterSpacing: 0.5,
+    fontSize: 13,
+    color: colors.textSecondary,
+    marginTop: 4,
   },
   editNameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    width: '100%',
-    maxWidth: 280,
-    marginBottom: 10,
-    gap: 6,
-  },
-  nameInput: {
-    flex: 1,
-    backgroundColor: '#F1F5F9',
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    fontSize: 15,
-    color: colors.dark,
-    fontWeight: '600',
-  },
-  saveNameBtn: {
-    backgroundColor: colors.primary,
-    padding: 8,
-    borderRadius: 8,
-  },
-  cancelNameBtn: {
-    backgroundColor: '#E2E8F0',
-    padding: 8,
-    borderRadius: 8,
-  },
-  groupTasksCountBadge: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: colors.primaryDark,
-  },
-  groupDescText: {
-    fontSize: 13,
-    color: colors.textSecondary,
-  },
-  groupMetaRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
     gap: 8,
   },
-  groupMetaText: {
-    fontSize: 12,
-    color: colors.dark,
-    fontWeight: '600',
-  },
-  noGroupProfileBox: {
-    padding: 14,
-    alignItems: 'center',
-    backgroundColor: '#F8FAFC',
-    borderRadius: 8,
-    gap: 4,
-  },
-  noGroupProfileText: {
-    fontSize: 12,
-    color: colors.textMuted,
-    textAlign: 'center',
-  },
-  sectionCard: {
-    backgroundColor: colors.white,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 16,
+  nameInput: {
+    height: 40,
     borderWidth: 1,
-    borderColor: colors.border,
+    borderColor: colors.primary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    fontSize: 15,
+    minWidth: 180,
   },
-  sectionTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: colors.darkMuted,
-    textTransform: 'uppercase',
-    marginBottom: 12,
-    letterSpacing: 0.5,
+  saveNameBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  stationRow: {
+  cancelNameBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 8,
+    backgroundColor: '#F1F5F9',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  groupCard: {
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 14,
   },
-  stationLabel: {
-    fontSize: 11,
-    color: colors.textMuted,
-    fontWeight: '600',
-  },
-  stationVal: {
-    fontSize: 14,
+  groupCardTitle: {
+    fontSize: 15,
     fontWeight: '700',
-    color: colors.dark,
+    color: colors.textPrimary,
+  },
+  groupCardSub: {
+    fontSize: 12,
+    color: colors.textSecondary,
     marginTop: 2,
   },
-  changeStationBtn: {
-    backgroundColor: '#E0F2FE',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 12,
-  },
-  changeStationText: {
-    color: colors.primaryDark || '#0284C7',
-    fontSize: 12,
-    fontWeight: '700',
-  },
-  menuRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderLight,
-  },
-  menuRowText: {
-    flex: 1,
-    marginLeft: 12,
-    fontSize: 15,
-    fontWeight: '600',
-    color: colors.dark,
-  },
-  passwordBox: {
-    backgroundColor: '#F8FAFC',
-    borderRadius: 12,
-    padding: 14,
-    marginVertical: 10,
+  menuCard: {
+    backgroundColor: colors.white,
+    borderRadius: 14,
     borderWidth: 1,
     borderColor: colors.border,
+    overflow: 'hidden',
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
+    minHeight: 48,
+  },
+  menuItemText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: colors.textPrimary,
+    flex: 1,
+  },
+  menuItemBadge: {
+    backgroundColor: colors.primary,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+    marginRight: 8,
+  },
+  menuItemBadgeText: {
+    color: colors.white,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  passwordBox: {
+    padding: 14,
+    backgroundColor: '#F8FAFC',
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderLight,
+    gap: 8,
   },
   passwordNoticeText: {
     fontSize: 12,
-    color: '#DC2626',
-    fontWeight: '600',
-    marginBottom: 8,
+    color: colors.danger,
   },
   passwordInput: {
+    height: 42,
     backgroundColor: colors.white,
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: 8,
     paddingHorizontal: 12,
-    paddingVertical: 8,
     fontSize: 14,
-    color: colors.dark,
-    marginBottom: 10,
   },
   updatePasswordBtn: {
+    height: 42,
     backgroundColor: colors.primary,
     borderRadius: 8,
-    paddingVertical: 10,
+    justifyContent: 'center',
     alignItems: 'center',
   },
   updatePasswordText: {
     color: colors.white,
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
   },
-  activityHeaderRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  emptyActivityText: {
-    fontSize: 13,
-    color: colors.textMuted,
-    fontStyle: 'italic',
-    marginVertical: 8,
-  },
-  activityItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 8,
+  activityBox: {
+    padding: 12,
+    backgroundColor: '#F8FAFC',
     borderBottomWidth: 1,
     borderBottomColor: colors.borderLight,
+  },
+  emptyText: {
+    fontSize: 12,
+    color: colors.textSecondary,
+    textAlign: 'center',
+    paddingVertical: 8,
+  },
+  activityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 6,
   },
   activityDot: {
     width: 6,
@@ -685,18 +626,17 @@ const styles = StyleSheet.create({
   },
   activityAction: {
     fontSize: 13,
-    fontWeight: '600',
-    color: colors.dark,
+    color: colors.textPrimary,
   },
   activityTime: {
     fontSize: 11,
-    color: colors.textMuted,
-    marginTop: 2,
+    color: colors.textSecondary,
   },
   versionText: {
     fontSize: 12,
-    color: colors.textMuted,
+    color: colors.textSecondary,
     textAlign: 'center',
-    marginTop: 10,
+    marginTop: 8,
+    marginBottom: 16,
   },
 });

@@ -8,6 +8,7 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint:imports": "eslint src",
+    "lint:empty": "node scripts/check-empty-files.js",
     "lint:a11y": "node scripts/check-a11y-roles.js"
   },
   "dependencies": {
@@ -19,10 +20,13 @@
     "@react-navigation/native-stack": "^6.10.1",
     "@supabase/supabase-js": "^2.49.1",
     "@tanstack/react-query": "^5.107.1",
+    "base64-arraybuffer": "^1.0.2",
     "exceljs": "^4.4.0",
     "expo": "^58.0.23",
     "expo-asset": "~58.0.20",
     "expo-font": "~58.0.11",
+    "expo-image-manipulator": "~58.0.16",
+    "expo-image-picker": "~58.0.10",
     "expo-linear-gradient": "~58.0.3",
     "expo-linking": "~58.0.16",
     "expo-status-bar": "~58.0.4",

@@ -38,6 +38,7 @@ import {
 import Header from '../../components/Header';
 import TaskCard from '../../components/TaskCard';
 import ProgressBar from '../../components/ProgressBar';
+import FilterButton from '../../components/FilterButton';
 import Pagination from '../../components/Pagination';
 import EmptyState from '../../components/EmptyState';
 import LoadingSkeleton from '../../components/LoadingSkeleton';
@@ -47,7 +48,8 @@ import { useWorkerGroups } from '../../hooks/useWorkerGroups';
 import { useWorkers } from '../../hooks/useWorkers';
 import { useAction } from '../../hooks/useAction';
 import { useToast } from '../../components/feedback';
-import { computeTaskCounts } from '../../utils/taskStatus';
+import { getTaskState, computeTaskCounts } from '../../utils/taskStatus';
+import { a11yRole } from '../../utils/a11y';
 import WorkerNotificationsModal from '../../components/WorkerNotificationsModal';
 import { useNotificationsContext } from '../../context/NotificationsProvider';
 import { colors, layout } from '../../theme';
@@ -87,6 +89,13 @@ export default function TodayScreen({ navigation, route }) {
   const [mutatingRuleId, setMutatingRuleId] = useState(null);
   const [notifModalVisible, setNotifModalVisible] = useState(false);
   const { unreadCount: workerUnreadNotifs } = useNotificationsContext();
+
+  // Load categories for system filter in FilterSheet
+  const { data: categories = [] } = useQuery({
+    queryKey: ['categories'],
+    queryFn: fetchCategories,
+    staleTime: 5 * 60 * 1000,
+  });
 
   // Range window: past 30 days to next 14 days
   const today = new Date();
@@ -239,33 +248,42 @@ export default function TodayScreen({ navigation, route }) {
     setRefreshing(false);
   };
 
-  // Worker filter tabs state: 'all' | 'pending' | 'submitted' | 'done' | 'rejected'
+  // Worker filter tabs state: 'all' | 'pending' | 'completed' | 'issue' | 'submitted' | 'returned'
   const [workerStatusFilter, setWorkerStatusFilter] = useState('all');
   const [page, setPage] = useState(1);
   const PAGE_SIZE = 10;
 
+  // Collapsible overdue section (collapsed by default)
+  const [overdueExpanded, setOverdueExpanded] = useState(false);
+
+  // Collapsible groups, select mode
+  const [expandedGroups, setExpandedGroups] = useState({});
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedTaskKeys, setSelectedTaskKeys] = useState(new Set());
+
   // Mutation with optimistic updates & friendly concurrent notice
   const updateLogMutation = useMutation({
-    mutationFn: async ({ task, status, note }) => {
-      // NEVER write 'done' directly from worker phone app!
-      const targetStatus = status === 'done' ? 'submitted' : status;
+    mutationFn: async ({ task, status, note, photos }) => {
+      const targetResult = status === 'issue' ? 'issue' : 'completed';
       return await upsertTaskLog({
         rule_id: task.rule_id,
         due_date: task.due_date,
-        status: targetStatus,
-        notes: note,
+        status: 'draft',
+        result: targetResult,
+        notes: note || null,
+        ...(Array.isArray(photos) ? { photo_paths: photos } : {}),
         done_by: user?.id || null,
       });
     },
-    onMutate: async ({ task, status, note }) => {
+    onMutate: async ({ task, status, note, photos }) => {
       setMutatingRuleId(task.rule_id);
       await queryClient.cancelQueries({ queryKey: ['task_logs'] });
-      const previousLogs = queryClient.getQueryData(['task_logs', pastWindowStart, futureWindowEnd]);
+      const previousLogs = queryClient.getQueryData(['task_logs', user?.id, pastWindowStart, futureWindowEnd, currentDateStr]);
 
-      const targetStatus = status === 'done' ? 'submitted' : status;
+      const targetResult = status === 'issue' ? 'issue' : 'completed';
 
       queryClient.setQueryData(
-        ['task_logs', pastWindowStart, futureWindowEnd],
+        ['task_logs', user?.id, pastWindowStart, futureWindowEnd, currentDateStr],
         (old = []) => {
           const filtered = old.filter(
             (l) => !(l.rule_id === task.rule_id && l.due_date === task.due_date)
@@ -276,11 +294,12 @@ export default function TodayScreen({ navigation, route }) {
               id: `opt-${Date.now()}`,
               rule_id: task.rule_id,
               due_date: task.due_date,
-              status: targetStatus,
-              notes: note,
+              status: 'draft',
+              result: targetResult,
+              notes: note || null,
+              photo_paths: Array.isArray(photos) ? photos : (task.log?.photo_paths || []),
               done_by: user?.id,
               done_at: new Date().toISOString(),
-              submitted_at: new Date().toISOString(),
             },
           ];
         }
@@ -291,7 +310,7 @@ export default function TodayScreen({ navigation, route }) {
     onError: (err, newTodo, context) => {
       if (context?.previousLogs) {
         queryClient.setQueryData(
-          ['task_logs', pastWindowStart, futureWindowEnd],
+          ['task_logs', user?.id, pastWindowStart, futureWindowEnd, currentDateStr],
           context.previousLogs
         );
       }
@@ -300,84 +319,31 @@ export default function TodayScreen({ navigation, route }) {
     onSettled: () => {
       setMutatingRuleId(null);
       queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+      queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_report_detail'] });
+      queryClient.invalidateQueries({ queryKey: ['daily_reports'] });
     },
   });
 
-  const handleUpdateStatus = (task, status, note) => {
+  const handleUpdateStatus = async (task, status, note, photos) => {
     if (mutatingRuleId) return; // double-submit prevention
 
-    const isDone = status === 'done';
-    const statusLabel = isDone
-      ? 'Submit for admin approval?'
-      : status === 'issue'
-      ? 'Report Issue'
-      : 'Skip Task';
+    if (status === 'completed' || status === 'done') {
+      try {
+        await updateLogMutation.mutateAsync({ task, status: 'completed', note: note || null, photos });
+        toast.success('Marked as completed', {
+          actionLabel: 'Undo',
+          onAction: () => handleUndoStatus(task),
+        });
+      } catch (_) {
+        // Error toast handled in mutation onError
+      }
+      return;
+    }
 
-    runAction({
-      confirm: {
-        title: isDone ? 'Submit for admin approval?' : `${statusLabel}?`,
-        message: isDone
-          ? 'Your admin will verify this task. It counts as done only after approval.'
-          : `${statusLabel} for "${task.equipment?.name || 'Equipment'}"?`,
-        details: [
-          `Date: ${task.due_date}`,
-          `Area: ${task.equipment?.area || 'General Area'}`,
-          note ? `Note: "${note}"` : null,
-        ].filter(Boolean),
-        confirmText: isDone ? 'Submit for Approval' : statusLabel,
-        cancelText: 'Cancel',
-        tone: status === 'issue' ? 'danger' : 'default',
-        icon: isDone
-          ? 'time-outline'
-          : status === 'issue'
-          ? 'alert-circle-outline'
-          : 'play-forward-outline',
-      },
-      loading: isDone ? 'Submitting for admin approval...' : 'Updating task status...',
-      action: async () => {
-        return await updateLogMutation.mutateAsync({ task, status, note });
-      },
-      success: isDone
-        ? 'Submitted. Waiting for admin approval.'
-        : `Task marked as ${status.toUpperCase()}`,
-    });
-  };
-
-  const handleCancelSubmission = (task) => {
-    if (mutatingRuleId) return;
-
-    runAction({
-      confirm: {
-        title: 'Cancel Submission?',
-        message: `Cancel submission for "${task.equipment?.name || 'Equipment'}"? The task will return to pending.`,
-        confirmText: 'Cancel Submission',
-        cancelText: 'Keep Submission',
-        tone: 'danger',
-        icon: 'close-circle-outline',
-      },
-      loading: 'Cancelling submission...',
-      action: async () => {
-        if (isConfigured && supabase) {
-          const { error: delErr } = await supabase
-            .from('task_logs')
-            .delete()
-            .eq('rule_id', task.rule_id)
-            .eq('due_date', task.due_date)
-            .eq('status', 'submitted');
-
-          if (delErr) {
-            if (delErr.message?.includes('already approved')) {
-              throw new Error('This task was already approved by the admin.');
-            }
-            throw delErr;
-          }
-        } else {
-          await undoTaskLog(task.rule_id, task.due_date, 'submitted');
-        }
-        queryClient.invalidateQueries({ queryKey: ['task_logs'] });
-      },
-      success: 'Submission cancelled. Task is now pending.',
-    });
+    // Issue report (called from TaskActionModal with required note)
+    await updateLogMutation.mutateAsync({ task, status: 'issue', note, photos });
+    toast.success('Issue reported');
   };
 
   const handleUndoStatus = (task) => {
@@ -385,19 +351,32 @@ export default function TodayScreen({ navigation, route }) {
 
     runAction({
       confirm: {
-        title: 'Undo Completion?',
-        message: `Reopen task for "${task.equipment?.name || 'Equipment'}" on ${task.due_date}?`,
-        confirmText: 'Reopen Task',
+        title: 'Remove Completion?',
+        message: `Remove your draft completion for "${task.equipment?.name || 'Equipment'}" on ${task.due_date}?`,
+        confirmText: 'Remove',
         cancelText: 'Cancel',
         tone: 'danger',
         icon: 'arrow-undo-outline',
       },
-      loading: 'Reopening task...',
+      loading: 'Removing draft...',
       action: async () => {
-        await undoTaskLog(task.rule_id, task.due_date);
+        if (isConfigured && supabase) {
+          const { error: delErr } = await supabase
+            .from('task_logs')
+            .delete()
+            .eq('rule_id', task.rule_id)
+            .eq('due_date', task.due_date)
+            .eq('status', 'draft');
+          if (delErr) throw delErr;
+        } else {
+          await undoTaskLog(task.rule_id, task.due_date);
+        }
         queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+        queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_report_detail'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_reports'] });
       },
-      success: 'Task reopened successfully',
+      success: 'Draft removed. Task is now pending.',
     });
   };
 
@@ -440,41 +419,138 @@ export default function TodayScreen({ navigation, route }) {
   // Status Filtered Tasks
   const statusFilteredTasks = useMemo(() => {
     if (workerStatusFilter === 'all') return selectedDateTasks;
-    if (workerStatusFilter === 'pending') {
-      return selectedDateTasks.filter((t) => t.status === 'pending');
-    }
-    if (workerStatusFilter === 'submitted') {
-      return selectedDateTasks.filter((t) => t.status === 'submitted');
-    }
-    if (workerStatusFilter === 'done') {
-      return selectedDateTasks.filter((t) => t.status === 'done');
-    }
-    if (workerStatusFilter === 'rejected') {
-      return selectedDateTasks.filter((t) => t.status === 'rejected');
-    }
-    return selectedDateTasks;
-  }, [selectedDateTasks, workerStatusFilter]);
+    return selectedDateTasks.filter((t) => {
+      const state = getTaskState(t.due_date, t.log, todayStr);
+      if (workerStatusFilter === 'pending') return state === 'pending' || state === 'overdue';
+      return state === workerStatusFilter;
+    });
+  }, [selectedDateTasks, workerStatusFilter, todayStr]);
 
   // Reset page when filter changes
   useEffect(() => {
     setPage(1);
   }, [workerStatusFilter, currentDateStr]);
 
-  // Paginated tasks
-  const paginatedTasks = useMemo(() => {
-    const start = (page - 1) * PAGE_SIZE;
-    return statusFilteredTasks.slice(start, start + PAGE_SIZE);
-  }, [statusFilteredTasks, page]);
+  // Build Filter sections for FilterSheet
+  const filterSections = useMemo(() => {
+    const sec = [
+      {
+        key: 'status',
+        label: 'Status',
+        options: [
+          { value: 'all', label: `All (${selectedDateTasks.length})` },
+          { value: 'pending', label: `Pending (${taskCounts.pending})` },
+          { value: 'completed', label: `Completed (${taskCounts.completed})` },
+          { value: 'issue', label: `Issues (${taskCounts.issue})` },
+          { value: 'submitted', label: `Submitted (${taskCounts.submitted})` },
+          { value: 'returned', label: `Returned (${taskCounts.returned})` },
+        ],
+      },
+    ];
 
-  // Group paginated tasks by group name
-  const groupedTasks = useMemo(() => {
-    return paginatedTasks.reduce((acc, t) => {
+    if (categories.length > 0) {
+      sec.push({
+        key: 'system',
+        label: 'System',
+        options: [
+          { value: 'ALL', label: 'All Systems' },
+          ...categories.map((c) => ({
+            value: c.id,
+            label: `${c.code}. ${c.name}`,
+          })),
+        ],
+      });
+    }
+
+    return sec;
+  }, [selectedDateTasks.length, taskCounts, categories]);
+
+  const filterValue = useMemo(() => {
+    return {
+      status: workerStatusFilter,
+      system: selection.categoryId || 'ALL',
+    };
+  }, [workerStatusFilter, selection.categoryId]);
+
+  const handleFilterChange = (newVal) => {
+    if (newVal.status !== undefined) {
+      setWorkerStatusFilter(newVal.status);
+    }
+    if (newVal.system !== undefined) {
+      if (newVal.system === 'ALL' || newVal.system === 'all' || !newVal.system) {
+        setSelection({
+          categoryId: null,
+          categoryName: 'All Systems',
+          area: 'All',
+        });
+      } else {
+        const cat = categories.find((c) => c.id === newVal.system);
+        setSelection({
+          categoryId: newVal.system,
+          categoryName: cat ? `${cat.code}. ${cat.name}` : 'Selected System',
+          area: 'All',
+        });
+      }
+    }
+  };
+
+  // Group statusFilteredTasks by equipment group name
+  const allGroupedEntries = useMemo(() => {
+    const map = {};
+    statusFilteredTasks.forEach((t) => {
       const groupName = t.group?.name || 'General Tasks';
-      if (!acc[groupName]) acc[groupName] = [];
-      acc[groupName].push(t);
-      return acc;
-    }, {});
-  }, [paginatedTasks]);
+      if (!map[groupName]) map[groupName] = [];
+      map[groupName].push(t);
+    });
+    return Object.entries(map); // [ [groupName, tasksArray], ... ]
+  }, [statusFilteredTasks]);
+
+  // Paginate on groups (PAGE_SIZE groups per page)
+  const paginatedGroupEntries = useMemo(() => {
+    const start = (page - 1) * PAGE_SIZE;
+    return allGroupedEntries.slice(start, start + PAGE_SIZE);
+  }, [allGroupedEntries, page]);
+
+  const profileMap = useMemo(() => {
+    if (!workerData?.allUsers) return null;
+    return new Map(workerData.allUsers.map((u) => [u.id, u.full_name]));
+  }, [workerData]);
+
+  const handleBulkMarkCompleted = async (tasksToMark) => {
+    if (!tasksToMark || tasksToMark.length === 0) return;
+    const rows = tasksToMark.map((t) => ({
+      rule_id: t.rule_id,
+      due_date: t.due_date,
+      status: 'draft',
+      result: 'completed',
+      done_by: user?.id || null,
+    }));
+    if (isConfigured && supabase) {
+      const { error } = await supabase.from('task_logs').upsert(rows, { onConflict: 'rule_id,due_date' });
+      if (error) throw error;
+    }
+    queryClient.invalidateQueries({ queryKey: ['task_logs'] });
+    queryClient.invalidateQueries({ queryKey: ['daily_report_detail'] });
+  };
+
+  const toggleGroupExpanded = (groupName, defaultExpanded) => {
+    setExpandedGroups((prev) => {
+      const current = prev[groupName] !== undefined ? prev[groupName] : defaultExpanded;
+      return { ...prev, [groupName]: !current };
+    });
+  };
+
+  const toggleTaskSelected = (taskKey) => {
+    setSelectedTaskKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskKey)) {
+        next.delete(taskKey);
+      } else {
+        next.add(taskKey);
+      }
+      return next;
+    });
+  };
 
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
 
@@ -523,6 +599,24 @@ export default function TodayScreen({ navigation, route }) {
     Platform.OS === 'android' ? (RNStatusBar.currentHeight || 0) : 0
   );
 
+  const myFirstName = (() => {
+    const full = (workerData?.allUsers || []).find((u) => u.id === user?.id)?.full_name || '';
+    return full.trim().split(' ')[0] || '';
+  })();
+  const greeting = (() => {
+    const h = new Date().getHours();
+    if (h < 12) return 'Good morning,';
+    if (h < 18) return 'Good afternoon,';
+    return 'Good evening,';
+  })();
+  const doneCount = taskCounts.completed + taskCounts.submitted + taskCounts.done;
+  const donePct = taskCounts.total > 0 ? Math.min(100, Math.round((doneCount / taskCounts.total) * 100)) : 0;
+  const monthLabel = (() => {
+    const [yy, mm] = String(currentDateStr).split('-').map(Number);
+    if (!yy || !mm) return '';
+    return new Date(yy, mm - 1, 1).toLocaleDateString([], { month: 'long', year: 'numeric' });
+  })();
+
   const getStatusColor = () => {
     if (connStatus === 'connected') return '#10B981';
     if (connStatus === 'checking') return '#F59E0B';
@@ -531,54 +625,40 @@ export default function TodayScreen({ navigation, route }) {
 
   return (
     <View style={styles.screen}>
-      {/* Slim Native Top Bar with safe area paddingTop */}
-      <View style={[styles.slimTopBar, { paddingTop: topInset + 6, height: topInset + 50 }]}>
-        <View style={styles.slimLeft}>
-          <View style={styles.slimLogo}>
-            <Ionicons name="sunny" size={16} color={colors.white} />
-          </View>
-          <View style={styles.systemChip}>
-            <Text style={styles.systemChipText} numberOfLines={1} ellipsizeMode="tail">
-              {selection.categoryName} • {selection.area}
-            </Text>
-          </View>
+      {/* Greeting header */}
+      <View style={[styles.greetBar, { paddingTop: topInset + 10 }]}>
+        <View style={styles.greetAvatar}>
+          <Text style={styles.greetAvatarText}>{(myFirstName || 'W').slice(0, 1).toUpperCase()}</Text>
         </View>
-
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-          {/* Supabase Status Dot */}
-          <TouchableOpacity
-            style={styles.dotTouch}
-            onPress={handleStatusPress}
-            activeOpacity={0.7}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-          >
-            <View
-              style={[
-                styles.statusDotOnly,
-                { backgroundColor: getStatusColor() },
-              ]}
-            />
-          </TouchableOpacity>
-
-          {/* Worker Notification Bell */}
-          <TouchableOpacity
-            style={styles.workerBellTouch}
-            onPress={() => setNotifModalVisible(true)}
-            activeOpacity={0.7}
-            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            accessibilityRole="button"
-            accessibilityLabel="Notifications"
-          >
-            <Ionicons name="notifications-outline" size={20} color={colors.white} />
-            {workerUnreadNotifs > 0 && (
-              <View style={styles.workerBellBadge}>
-                <Text style={styles.workerBellBadgeText}>
-                  {workerUnreadNotifs > 99 ? '99+' : workerUnreadNotifs}
-                </Text>
-              </View>
-            )}
-          </TouchableOpacity>
+        <View style={styles.greetTextWrap}>
+          <Text style={styles.greetHello}>{greeting}</Text>
+          <Text style={styles.greetName} numberOfLines={1}>{myFirstName || 'Worker'}</Text>
         </View>
+        <TouchableOpacity
+          style={styles.dotTouch}
+          onPress={handleStatusPress}
+          activeOpacity={0.7}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          accessibilityLabel="Connection status"
+        >
+          <View style={[styles.statusDotOnly, { backgroundColor: getStatusColor() }]} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.greetBell}
+          onPress={() => setNotifModalVisible(true)}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Notifications"
+        >
+          <Ionicons name="notifications-outline" size={22} color={colors.dark} />
+          {workerUnreadNotifs > 0 && (
+            <View style={styles.workerBellBadge}>
+              <Text style={styles.workerBellBadgeText}>
+                {workerUnreadNotifs > 99 ? '99+' : workerUnreadNotifs}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
 
       <ScrollView
@@ -592,91 +672,52 @@ export default function TodayScreen({ navigation, route }) {
         visible={notifModalVisible}
         onClose={() => setNotifModalVisible(false)}
         onSelectNotification={(notif) => {
-          if (notif?.type === 'task_rejected') {
-            setWorkerStatusFilter('rejected');
+          const reportDate = notif?.data?.report_date || notif?.due_date || notif?.data?.due_date;
+          if (notif?.type === 'report_reviewed' || notif?.type === 'report_returned' || notif?.type === 'task_assigned') {
+            if (navigation?.navigate) {
+              navigation.navigate('WorkerReportTab', { reportDate: reportDate || currentDateStr });
+            }
           }
         }}
       />
 
-      {/* Large Scrollable Heading inside the scrollable content */}
-        <View style={styles.pageHeadingSection}>
-          <Text style={styles.pageTitle} numberOfLines={1} ellipsizeMode="tail">
-            Today's Tasks
-          </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 4 }}>
-            <Text style={styles.pageSubtitle} numberOfLines={1} ellipsizeMode="tail">
-              {selection.categoryName} • {selection.area}
-            </Text>
-            {selection.categoryId && (
-              <TouchableOpacity
-                onPress={handleResetFilters}
-                style={{ paddingVertical: 2, paddingHorizontal: 8, backgroundColor: '#E0F2FE', borderRadius: 6 }}
-              >
-                <Text style={{ fontSize: 11, fontWeight: '700', color: colors.primary }}>
-                  Show All Systems
-                </Text>
-              </TouchableOpacity>
-            )}
+        {/* Hero progress card */}
+        <View style={styles.heroCard}>
+          <View style={styles.heroTop}>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.heroLabel}>Today's work</Text>
+              <Text style={styles.heroBig}>
+                {doneCount}
+                <Text style={styles.heroBigSub}>/{taskCounts.total}</Text>
+              </Text>
+            </View>
+            {myGroup ? (
+              <View style={styles.heroGroupPill}>
+                <View style={[styles.heroGroupDot, { backgroundColor: myGroup.color || colors.primary }]} />
+                <Text style={styles.heroGroupText} numberOfLines={1}>{myGroup.name}</Text>
+              </View>
+            ) : null}
+          </View>
+          <View style={styles.heroTrack}>
+            <View style={[styles.heroFill, { width: `${donePct}%` }]} />
+          </View>
+          <View style={styles.heroBottom}>
+            <Text style={styles.heroMeta}>{donePct}%{taskCounts.submitted > 0 ? `  \u2022  ${taskCounts.submitted} sent` : ''}</Text>
+            {myGroup?.shift_start && myGroup?.shift_end ? (
+              <Text style={styles.heroMeta}>
+                {myGroup.shift_start.slice(0, 5)} - {myGroup.shift_end.slice(0, 5)}
+              </Text>
+            ) : null}
           </View>
         </View>
 
-        {/* Quick Date Switcher: Yesterday / Today / Tomorrow */}
-        <View style={styles.quickDateRow}>
-          <TouchableOpacity
-            style={[
-              styles.quickDateBtn,
-              currentDateStr === formatDate(addDays(new Date(), -1)) && styles.quickDateActive,
-            ]}
-            onPress={() => setCurrentDateStr(formatDate(addDays(new Date(), -1)))}
-          >
-            <Text
-              style={[
-                styles.quickDateText,
-                currentDateStr === formatDate(addDays(new Date(), -1)) && styles.quickDateTextActive,
-              ]}
-            >
-              Yesterday
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.quickDateBtn,
-              currentDateStr === todayStr && styles.quickDateActive,
-            ]}
-            onPress={() => setCurrentDateStr(todayStr)}
-          >
-            <Text
-              style={[
-                styles.quickDateText,
-                currentDateStr === todayStr && styles.quickDateTextActive,
-              ]}
-            >
-              Today
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.quickDateBtn,
-              currentDateStr === formatDate(addDays(new Date(), 1)) && styles.quickDateActive,
-            ]}
-            onPress={() => setCurrentDateStr(formatDate(addDays(new Date(), 1)))}
-          >
-            <Text
-              style={[
-                styles.quickDateText,
-                currentDateStr === formatDate(addDays(new Date(), 1)) && styles.quickDateTextActive,
-              ]}
-            >
-              Tomorrow
-            </Text>
-          </TouchableOpacity>
+        <View style={styles.monthRow}>
+          <Text style={styles.monthText}>{monthLabel}</Text>
+          <Ionicons name="calendar-outline" size={18} color={colors.textSecondary} />
         </View>
 
-        {/* This Week (Mon-Sun strip) */}
+        {/* This Week (Mon-Sun compact strip) */}
         <View style={styles.weekStripContainer}>
-          <Text style={styles.stripLabel}>WORK WEEK STRIP</Text>
           <View style={styles.weekStrip}>
             {weekInfo.days.map((day) => {
               const isSelected = day.date === currentDateStr;
@@ -721,84 +762,37 @@ export default function TodayScreen({ navigation, route }) {
           </View>
         </View>
 
-        {/* Group & Team Header Box */}
-        {myGroup ? (
-          <View style={styles.teamInfoBanner}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-              <WorkerGroupBadge group={myGroup} />
-              {myGroup.shift_start && myGroup.shift_end && (
-                <Text style={styles.shiftHintText}>
-                  Shift {myGroup.shift_start.slice(0, 5)} - {myGroup.shift_end.slice(0, 5)}
-                </Text>
-              )}
-            </View>
-            <Text style={styles.teammatesText}>
-              Team: {myTeammates.length > 0 ? myTeammates.join(', ') : 'You are the only active member'}
-            </Text>
-          </View>
-        ) : (
+        {!myGroup ? (
           <View style={styles.noGroupBanner}>
             <Ionicons name="information-circle-outline" size={16} color="#0284C7" />
-            <Text style={styles.noGroupBannerText}>
-              You are currently not in any worker group. Ask an admin to assign you in Assign Workers.
-            </Text>
+            <Text style={styles.noGroupBannerText}>Not in a worker group. Ask your admin.</Text>
           </View>
-        )}
+        ) : null}
 
-        {/* Progress Bar: Counts ONLY approved tasks, plus waiting line */}
-        <ProgressBar
-          completed={taskCounts.done}
-          total={taskCounts.total}
-          waiting={taskCounts.waiting}
-          title={currentDateStr === todayStr ? "Today's Progress" : `Progress for ${currentDateStr}`}
-        />
-
-        {/* Worker Status Filter Chips */}
-        <View style={styles.filterChipRow}>
-          <TouchableOpacity
-            style={[styles.filterChip, workerStatusFilter === 'all' && styles.filterChipActive]}
-            onPress={() => setWorkerStatusFilter('all')}
-          >
-            <Text style={[styles.filterChipText, workerStatusFilter === 'all' && styles.filterChipTextActive]}>
-              All ({selectedDateTasks.length})
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.filterChip, workerStatusFilter === 'pending' && styles.filterChipActive]}
-            onPress={() => setWorkerStatusFilter('pending')}
-          >
-            <Text style={[styles.filterChipText, workerStatusFilter === 'pending' && styles.filterChipTextActive]}>
-              Pending ({taskCounts.pending})
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.filterChip, workerStatusFilter === 'submitted' && styles.filterChipActive]}
-            onPress={() => setWorkerStatusFilter('submitted')}
-          >
-            <Text style={[styles.filterChipText, workerStatusFilter === 'submitted' && styles.filterChipTextActive]}>
-              Waiting ({taskCounts.waiting})
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.filterChip, workerStatusFilter === 'done' && styles.filterChipActive]}
-            onPress={() => setWorkerStatusFilter('done')}
-          >
-            <Text style={[styles.filterChipText, workerStatusFilter === 'done' && styles.filterChipTextActive]}>
-              Done ({taskCounts.done})
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.filterChip, workerStatusFilter === 'rejected' && styles.filterChipActive]}
-            onPress={() => setWorkerStatusFilter('rejected')}
-          >
-            <Text style={[styles.filterChipText, workerStatusFilter === 'rejected' && styles.filterChipTextActive]}>
-              Rejected ({taskCounts.rejected})
-            </Text>
-          </TouchableOpacity>
+        {/* Progress + actions: one aligned row */}
+        <View style={styles.progressActionRow}>
+          <View style={{ flex: 1 }}>
+            <Text style={styles.sectionTitle}>All Tasks</Text>
+          </View>
+          {statusFilteredTasks.length > 0 && (
+            <TouchableOpacity
+              style={styles.selectModeBtn}
+              onPress={() => {
+                setSelectMode((prev) => !prev);
+                setSelectedTaskKeys(new Set());
+              }}
+              activeOpacity={0.8}
+              {...a11yRole('button')}
+            >
+              <Text style={styles.selectModeBtnText}>{selectMode ? 'Cancel' : 'Select'}</Text>
+            </TouchableOpacity>
+          )}
+          <FilterButton
+            sections={filterSections}
+            value={filterValue}
+            onChange={handleFilterChange}
+            resultCount={statusFilteredTasks.length}
+          />
         </View>
 
         {/* Loading / Error states */}
@@ -811,57 +805,62 @@ export default function TodayScreen({ navigation, route }) {
           />
         ) : (
           <>
-            {/* OVERDUE TASKS SECTION */}
+            {/* OVERDUE TASKS SECTION (Collapsed by default with count badge) */}
             {overdueTasks.length > 0 && (
               <View style={styles.overdueSection}>
-                <View style={styles.overdueHeader}>
-                  <Ionicons name="warning" size={20} color={colors.danger} />
-                  <Text style={styles.overdueTitle}>
-                    Overdue Tasks ({overdueTasks.length})
-                  </Text>
-                </View>
-                <Text style={styles.overdueNotice}>
-                  Past scheduled maintenance pending completion
-                </Text>
-                {overdueTasks.map((task) => (
-                  <TaskCard
-                    key={`overdue-${task.id}`}
-                    task={task}
-                    onUpdateStatus={handleUpdateStatus}
-                    onUndoStatus={handleUndoStatus}
-                    currentUserId={user?.id}
+                <TouchableOpacity
+                  style={styles.overdueHeaderTouch}
+                  onPress={() => setOverdueExpanded((prev) => !prev)}
+                  activeOpacity={0.7}
+                  {...a11yRole('button')}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <Ionicons name="warning" size={18} color={colors.danger} />
+                    <Text style={styles.overdueTitle}>Overdue Tasks</Text>
+                    <View style={styles.overdueCountBadge}>
+                      <Text style={styles.overdueCountBadgeText}>{overdueTasks.length}</Text>
+                    </View>
+                  </View>
+                  <Ionicons
+                    name={overdueExpanded ? 'chevron-down' : 'chevron-forward'}
+                    size={16}
+                    color={colors.danger}
                   />
-                ))}
+                </TouchableOpacity>
+
+                {overdueExpanded && (
+                  <View style={{ marginTop: 8 }}>
+                    {overdueTasks.map((task) => (
+                      <TaskCard
+                        key={`overdue-${task.id}`}
+                        task={task}
+                        onUpdateStatus={handleUpdateStatus}
+                        onUndoStatus={handleUndoStatus}
+                        currentUserId={user?.id}
+                      />
+                    ))}
+                  </View>
+                )}
               </View>
             )}
-
-            {/* SCHEDULED TASKS FOR SELECTED DATE */}
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionHeading}>
-                Scheduled for {currentDateStr === todayStr ? 'Today' : currentDateStr}
-              </Text>
-              <Text style={styles.taskCountText}>
-                {selectedDateTasks.length} {selectedDateTasks.length === 1 ? 'task' : 'tasks'}
-              </Text>
-            </View>
 
             {/* Honest Empty States */}
             {!myGroupId ? (
               <EmptyState
-                title="Not in a worker group yet"
-                message="You are not in a worker group yet. Please contact your admin."
+                title="No group yet"
+                message="Contact your admin."
                 icon="people-outline"
               />
             ) : rawRules.length === 0 ? (
               <EmptyState
-                title="No tasks for your group yet"
-                message="No tasks for your group yet. Your administrator has not assigned schedule rules to your group."
+                title="No tasks yet"
+                message="Nothing assigned yet."
                 icon="calendar-outline"
               />
             ) : rules.length === 0 ? (
               <EmptyState
-                title="Tasks hidden by system filter"
-                message="Tasks are assigned to your group, but none match the currently selected system or area."
+                title="Hidden by filter"
+                message="No match for this filter."
                 icon="filter-outline"
                 actionLabel="Show all my tasks"
                 onAction={handleResetFilters}
@@ -869,8 +868,8 @@ export default function TodayScreen({ navigation, route }) {
             ) : selectedDateTasks.length === 0 ? (
               hiddenCountByFilter > 0 ? (
                 <EmptyState
-                  title="Tasks hidden by filter"
-                  message={`${hiddenCountByFilter} ${hiddenCountByFilter === 1 ? 'task is' : 'tasks are'} hidden by your system/area filter for ${currentDateStr}.`}
+                  title="Hidden by filter"
+                  message={`${hiddenCountByFilter} hidden by filter.`}
                   icon="funnel-outline"
                   actionLabel="Show all my tasks"
                   onAction={handleResetFilters}
@@ -880,53 +879,133 @@ export default function TodayScreen({ navigation, route }) {
                   title="No tasks due today"
                   message={
                     nextUpcomingTask
-                      ? `No tasks due today. Next task: ${nextUpcomingTask.equipmentName} on ${nextUpcomingTask.date}`
-                      : 'No tasks due today. All scheduled maintenance is up to date.'
+                      ? `Next: ${nextUpcomingTask.equipmentName}, ${nextUpcomingTask.date}`
+                      : 'All up to date.'
                   }
                   icon="checkmark-done-circle-outline"
-                  actionLabel="Switch System or Area"
+                  actionLabel="Change filter"
                   onAction={() => navigation.navigate('ChooseWorkTab', { isChangingWork: true })}
                 />
               )
             ) : statusFilteredTasks.length === 0 ? (
               <EmptyState
                 title={`No ${workerStatusFilter} tasks`}
-                message={`There are no ${workerStatusFilter} tasks for ${currentDateStr}.`}
+                message="Try another filter."
                 icon="filter-outline"
                 actionLabel="View all tasks"
                 onAction={() => setWorkerStatusFilter('all')}
               />
             ) : (
               <>
-                {Object.entries(groupedTasks).map(([groupName, tasksInGroup]) => (
-                  <View key={groupName} style={styles.groupContainer}>
-                    <View style={styles.groupHeaderBar}>
-                      <Ionicons name="layers-outline" size={16} color={colors.primaryDark} />
-                      <Text style={styles.groupHeaderTitle}>{groupName}</Text>
-                      <Text style={styles.groupHeaderCount}>
-                        ({tasksInGroup.length})
-                      </Text>
-                    </View>
-                    {tasksInGroup.map((task) => (
-                      <TaskCard
-                        key={task.id}
-                        task={task}
-                        onUpdateStatus={handleUpdateStatus}
-                        onUndoStatus={handleUndoStatus}
-                        onCancelSubmission={handleCancelSubmission}
-                        currentUserId={user?.id}
-                        profileMap={workerData?.allUsers ? new Map(workerData.allUsers.map((u) => [u.id, u.full_name])) : null}
-                      />
-                    ))}
-                  </View>
-                ))}
+                {paginatedGroupEntries.map(([groupName, tasksInGroup]) => {
+                  const pendingInGroup = tasksInGroup.filter((t) => {
+                    const st = getTaskState(t.due_date, t.log, todayStr);
+                    return st === 'pending' || st === 'overdue' || st === 'returned';
+                  });
+                  const completedInGroup = tasksInGroup.filter((t) => {
+                    const st = getTaskState(t.due_date, t.log, todayStr);
+                    return st === 'completed' || st === 'issue' || st === 'submitted' || st === 'done';
+                  });
+                  const defaultExpanded = false; // Collapsed by default
+                  const isExpanded = expandedGroups[groupName] !== undefined
+                    ? expandedGroups[groupName]
+                    : defaultExpanded;
 
-                {/* 10 per page pagination */}
-                {statusFilteredTasks.length > PAGE_SIZE && (
+                  return (
+                    <View key={groupName} style={styles.groupContainer}>
+                      {/* Equipment-group header: one line: icon, group name, short progress "4/6" and chevron */}
+                      <TouchableOpacity
+                        style={styles.groupHeaderBar}
+                        onPress={() => toggleGroupExpanded(groupName, defaultExpanded)}
+                        activeOpacity={0.8}
+                        {...a11yRole('button')}
+                      >
+                        <Ionicons
+                          name="hardware-chip-outline"
+                          size={18}
+                          color={colors.primary}
+                          style={{ marginRight: 6 }}
+                        />
+                        <Text style={styles.groupHeaderTitle} numberOfLines={1} ellipsizeMode="tail">
+                          {groupName}
+                        </Text>
+                        <Text style={styles.groupHeaderProgressShort}>
+                          {completedInGroup.length}/{tasksInGroup.length}
+                        </Text>
+                        <Ionicons
+                          name={isExpanded ? 'chevron-down' : 'chevron-forward'}
+                          size={16}
+                          color={colors.textSecondary}
+                          style={{ marginLeft: 6 }}
+                        />
+                        {pendingInGroup.length > 0 && (
+                          <TouchableOpacity
+                            style={styles.markAllBtn}
+                            onPress={() => {
+                              runAction({
+                                confirm: {
+                                  title: 'Mark All Completed?',
+                                  message: `Mark all ${pendingInGroup.length} pending task${pendingInGroup.length === 1 ? '' : 's'} in "${groupName}" as completed?`,
+                                  confirmText: 'Mark All',
+                                  cancelText: 'Cancel',
+                                  tone: 'default',
+                                  icon: 'checkmark-done-outline',
+                                },
+                                loading: 'Marking tasks...',
+                                action: () => handleBulkMarkCompleted(pendingInGroup),
+                                success: `${pendingInGroup.length} task${pendingInGroup.length === 1 ? '' : 's'} marked as completed.`,
+                              });
+                            }}
+                            activeOpacity={0.8}
+                            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                            {...a11yRole('button')}
+                          >
+                            <Ionicons name="checkmark-done-outline" size={14} color={colors.primary} />
+                            <Text style={styles.markAllBtnText}>Mark all</Text>
+                          </TouchableOpacity>
+                        )}
+                      </TouchableOpacity>
+
+                      {/* Task cards (collapsible) */}
+                      {isExpanded && tasksInGroup.map((task) => {
+                        const taskKey = `${task.rule_id}__${task.due_date}`;
+                        const isSelected = selectedTaskKeys.has(taskKey);
+                        return (
+                          <View key={task.id} style={styles.taskCardWrapper}>
+                            {selectMode && (
+                              <TouchableOpacity
+                                style={[styles.checkboxOuter, isSelected && styles.checkboxOuterSelected]}
+                                onPress={() => toggleTaskSelected(taskKey)}
+                                activeOpacity={0.7}
+                                {...a11yRole('button')}
+                              >
+                                {isSelected && (
+                                  <Ionicons name="checkmark" size={14} color={colors.white} />
+                                )}
+                              </TouchableOpacity>
+                            )}
+                            <View style={{ flex: 1 }}>
+                              <TaskCard
+                                task={task}
+                                onUpdateStatus={handleUpdateStatus}
+                                onUndoStatus={handleUndoStatus}
+                                currentUserId={user?.id}
+                                profileMap={profileMap}
+                              />
+                            </View>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  );
+                })}
+
+                {/* Group-level pagination */}
+                {allGroupedEntries.length > PAGE_SIZE && (
                   <View style={{ marginTop: 8, marginBottom: 16 }}>
                     <Pagination
                       currentPage={page}
-                      totalItems={statusFilteredTasks.length}
+                      totalItems={allGroupedEntries.length}
                       pageSize={PAGE_SIZE}
                       onPageChange={setPage}
                     />
@@ -1002,14 +1081,231 @@ export default function TodayScreen({ navigation, route }) {
           </View>
         )}
       </ScrollView>
+
+      {/* Sticky submit: the single next step once tasks are recorded */}
+      {!selectMode && (taskCounts.completed + taskCounts.issue) > 0 && (
+        <View style={styles.submitBar}>
+          <TouchableOpacity
+            style={styles.submitBarBtn}
+            onPress={() => navigation.navigate('WorkerReportTab')}
+            activeOpacity={0.85}
+            {...a11yRole('button')}
+            accessibilityLabel="Submit report"
+          >
+            <Ionicons name="paper-plane-outline" size={18} color={colors.white} />
+            <Text style={styles.submitBarBtnText}>
+              Submit report ({taskCounts.completed + taskCounts.issue})
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Select mode bulk action bar */}
+      {selectMode && selectedTaskKeys.size > 0 && (
+        <View style={styles.bulkActionBar}>
+          <Text style={styles.bulkActionText}>
+            {selectedTaskKeys.size} selected
+          </Text>
+          <TouchableOpacity
+            style={styles.bulkMarkBtn}
+            onPress={() => {
+              const tasksToMark = statusFilteredTasks.filter((t) => {
+                const taskKey = `${t.rule_id}__${t.due_date}`;
+                return selectedTaskKeys.has(taskKey);
+              });
+              runAction({
+                confirm: {
+                  title: 'Mark Selected Completed?',
+                  message: `Mark ${tasksToMark.length} selected task${tasksToMark.length === 1 ? '' : 's'} as completed?`,
+                  confirmText: 'Mark Completed',
+                  cancelText: 'Cancel',
+                  tone: 'default',
+                  icon: 'checkmark-done-outline',
+                },
+                loading: 'Marking tasks...',
+                action: async () => {
+                  await handleBulkMarkCompleted(tasksToMark);
+                  setSelectMode(false);
+                  setSelectedTaskKeys(new Set());
+                },
+                success: `${tasksToMark.length} task${tasksToMark.length === 1 ? '' : 's'} marked as completed.`,
+              });
+            }}
+            activeOpacity={0.85}
+            {...a11yRole('button')}
+          >
+            <Ionicons name="checkmark-done-outline" size={16} color={colors.white} />
+            <Text style={styles.bulkMarkBtnText}>
+              Mark {selectedTaskKeys.size} completed
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.bulkCancelBtn}
+            onPress={() => {
+              setSelectMode(false);
+              setSelectedTaskKeys(new Set());
+            }}
+            activeOpacity={0.8}
+            {...a11yRole('button')}
+          >
+            <Text style={styles.bulkCancelBtnText}>Cancel</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Sticky Daily Report Summary Card */}
+      {myGroupId && !selectMode ? (
+        <View style={styles.stickyReportBar}>
+          <View style={styles.stickyReportInfo}>
+            <Text style={styles.stickyReportTitle}>
+              Daily report for {currentDateStr}
+            </Text>
+            <Text style={styles.stickyReportSub}>
+              {taskCounts.completed + taskCounts.submitted + taskCounts.done + taskCounts.issue} completed, {taskCounts.pending} pending, {taskCounts.issue} issue
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.stickyReportBtn}
+            onPress={() => {
+              if (navigation?.navigate) {
+                navigation.navigate('WorkerReportTab', { reportDate: currentDateStr });
+              }
+            }}
+            activeOpacity={0.85}
+            {...a11yRole('button')}
+          >
+            <Text style={styles.stickyReportBtnText}>Review and submit report</Text>
+          </TouchableOpacity>
+        </View>
+      ) : null}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
+  greetBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+    backgroundColor: colors.background,
+  },
+  greetAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.dark,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  greetAvatarText: { color: colors.white, fontSize: 18, fontWeight: '800' },
+  greetTextWrap: { flex: 1 },
+  greetHello: { fontSize: 14, color: colors.textSecondary },
+  greetName: { fontSize: 18, fontWeight: '800', color: colors.dark },
+  greetBell: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: 8,
+  },
+  heroCard: {
+    backgroundColor: '#0A0A0A',
+    borderRadius: 20,
+    padding: 18,
+    marginBottom: 16,
+  },
+  heroTop: { flexDirection: 'row', alignItems: 'flex-start' },
+  heroLabel: { fontSize: 14, color: '#D1D5DB' },
+  heroBig: { fontSize: 36, fontWeight: '800', color: '#FFFFFF', marginTop: 2 },
+  heroBigSub: { fontSize: 20, fontWeight: '600', color: '#9CA3AF' },
+  heroGroupPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    maxWidth: 150,
+  },
+  heroGroupDot: { width: 8, height: 8, borderRadius: 4, marginRight: 6 },
+  heroGroupText: { color: '#FFFFFF', fontSize: 14, fontWeight: '700' },
+  heroTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+    marginTop: 14,
+    overflow: 'hidden',
+  },
+  heroFill: { height: 6, borderRadius: 3, backgroundColor: '#0EA5E9' },
+  heroBottom: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
+  heroMeta: { fontSize: 14, color: '#D1D5DB' },
+  monthRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  monthText: { fontSize: 16, fontWeight: '800', color: colors.dark },
+  sectionTitle: { fontSize: 18, fontWeight: '800', color: colors.dark },
+  compactGroupRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  progressActionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
   screen: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  stickyReportBar: {
+    backgroundColor: colors.white,
+    borderTopWidth: 1,
+    borderTopColor: colors.border,
+    paddingTop: 10,
+    paddingBottom: 10,
+    paddingLeft: 16,
+    paddingRight: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  stickyReportInfo: {
+    flex: 1,
+  },
+  stickyReportTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: colors.dark,
+  },
+  stickyReportSub: {
+    fontSize: 12,
+    color: colors.textSecondary,
+  },
+  stickyReportBtn: {
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    paddingTop: 8,
+    paddingBottom: 8,
+    paddingLeft: 12,
+    paddingRight: 12,
+  },
+  stickyReportBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.white,
   },
   slimTopBar: {
     backgroundColor: colors.dark,
@@ -1157,12 +1453,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   weekStripContainer: {
-    backgroundColor: colors.white,
-    borderRadius: 14,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: colors.border,
-    marginBottom: 16,
+    marginBottom: 18,
   },
   stripLabel: {
     fontSize: 11,
@@ -1180,11 +1471,11 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     paddingVertical: 10,
-    borderRadius: 10,
-    backgroundColor: colors.background,
+    borderRadius: 14,
+    backgroundColor: colors.white,
     borderWidth: 1,
     borderColor: colors.borderLight,
-    minHeight: layout.minTouchTarget,
+    minHeight: 64,
     justifyContent: 'center',
   },
   dayPillToday: {
@@ -1192,8 +1483,8 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primaryVeryLight,
   },
   dayPillSelected: {
-    backgroundColor: colors.primary,
-    borderColor: colors.primary,
+    backgroundColor: '#0A0A0A',
+    borderColor: '#0A0A0A',
   },
   dayShort: {
     fontSize: 11,
@@ -1265,24 +1556,201 @@ const styles = StyleSheet.create({
   groupHeaderBar: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: colors.primaryVeryLight,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 8,
+    backgroundColor: colors.white,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    minHeight: 56,
+    borderRadius: 16,
     marginBottom: 8,
-    borderLeftWidth: 4,
-    borderLeftColor: colors.primary,
+    borderWidth: 1,
+    borderColor: colors.border,
   },
   groupHeaderTitle: {
     fontSize: 14,
     fontWeight: '700',
     color: colors.dark,
-    marginLeft: 6,
+  },
+  groupHeaderSub: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: colors.textSecondary,
+    marginTop: 1,
   },
   groupHeaderCount: {
     fontSize: 12,
     fontWeight: '600',
     color: colors.primaryDark,
+    marginLeft: 6,
+  },
+  markAllBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.primaryVeryLight,
+    borderWidth: 1,
+    borderColor: colors.primaryLight,
+    borderRadius: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginLeft: 8,
+  },
+  markAllBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.primary,
+    marginLeft: 3,
+  },
+  selectModeBtn: {
+    backgroundColor: '#1E1E1E',
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  selectModeBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.white,
+  },
+  taskCardWrapper: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+  },
+  checkboxOuter: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    borderWidth: 2,
+    borderColor: colors.border,
+    backgroundColor: colors.white,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 20,
+    marginRight: 8,
+  },
+  checkboxOuterSelected: {
+    backgroundColor: colors.primary,
+    borderColor: colors.primary,
+  },
+  submitBar: {
+    backgroundColor: colors.white,
+    borderTopWidth: 1,
+    borderTopColor: '#E4E4E7',
+    paddingTop: 10,
+    paddingBottom: 10,
+    paddingLeft: 16,
+    paddingRight: 16,
+  },
+  submitBarBtn: {
+    minHeight: 48,
+    borderRadius: 12,
+    backgroundColor: colors.primary,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  submitBarBtnText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: colors.white,
+  },
+  bulkActionBar: {
+    backgroundColor: colors.dark,
+    paddingTop: 10,
+    paddingBottom: 10,
+    paddingLeft: 16,
+    paddingRight: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  bulkActionText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.white,
+    flex: 1,
+  },
+  bulkMarkBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.primary,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    marginRight: 8,
+  },
+  bulkMarkBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.white,
+    marginLeft: 5,
+  },
+  bulkCancelBtn: {
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  bulkCancelBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#94A3B8',
+  },
+  oneLineProgressCard: {
+    backgroundColor: colors.white,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginBottom: 12,
+  },
+  oneLineProgressText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: colors.textPrimary,
+    marginBottom: 6,
+  },
+  progressTrackCompact: {
+    height: 6,
+    backgroundColor: '#E2E8F0',
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFillCompact: {
+    height: '100%',
+    backgroundColor: colors.primary,
+    borderRadius: 3,
+  },
+  filterBarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+    minHeight: 44,
+  },
+  taskCountMuted: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  overdueHeaderTouch: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  overdueCountBadge: {
+    backgroundColor: '#FEE2E2',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  overdueCountBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.danger,
+  },
+  groupHeaderProgressShort: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.primary,
     marginLeft: 6,
   },
   filterChipRow: {

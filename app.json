@@ -14,7 +14,8 @@
     },
     "plugins": [
       "expo-asset",
-      "expo-font"
+      "expo-font",
+      ["expo-image-picker", { "cameraPermission": "Allow Solar PM to use the camera to photograph equipment issues and completed work", "photosPermission": "Allow Solar PM to attach photos of equipment and completed work" }]
     ]
   }
 }

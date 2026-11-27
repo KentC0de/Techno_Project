@@ -38,7 +38,9 @@ export function useTaskLogsRealtime({ filterUserId = null } = {}) {
       debounceTimerRef.current = setTimeout(() => {
         // Invalidate by shared prefixes
         queryClient.invalidateQueries({ queryKey: ['approvals'] });
-        queryClient.invalidateQueries({ queryKey: ['pending_approvals'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_reports'] });
+        queryClient.invalidateQueries({ queryKey: ['daily_report_detail'] });
+        queryClient.invalidateQueries({ queryKey: ['submitted_reports_count'] });
         queryClient.invalidateQueries({ queryKey: ['task_logs'] });
         queryClient.invalidateQueries({ queryKey: ['taskLogs'] });
         queryClient.invalidateQueries({ queryKey: ['calendar_tasks'] });
@@ -57,10 +59,25 @@ export function useTaskLogsRealtime({ filterUserId = null } = {}) {
 
     channel.on('postgres_changes', filterObj, (payload) => {
       if (__DEV__) {
-        console.log('[useTaskLogsRealtime event]', payload?.eventType, payload?.new?.id || payload?.old?.id);
+        console.log('[useTaskLogsRealtime task_logs]', payload?.eventType, payload?.new?.id || payload?.old?.id);
       }
       triggerInvalidation();
     });
+
+    channel.on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'daily_reports',
+      },
+      (payload) => {
+        if (__DEV__) {
+          console.log('[useTaskLogsRealtime daily_reports]', payload?.eventType, payload?.new?.id || payload?.old?.id);
+        }
+        triggerInvalidation();
+      }
+    );
 
     channel.subscribe((status, err) => {
       setRealtimeStatus(status);

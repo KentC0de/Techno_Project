@@ -29,11 +29,11 @@ function formatRelativeTime(isoStr) {
 
 function getNotificationIcon(type) {
   switch (type) {
-    case 'task_submitted':
-      return { name: 'time-outline', color: colors.primary };
-    case 'task_approved':
-      return { name: 'checkmark-circle-outline', color: '#16A34A' };
-    case 'task_rejected':
+    case 'report_submitted':
+      return { name: 'document-text-outline', color: '#D97706' };
+    case 'report_reviewed':
+      return { name: 'checkmark-circle-outline', color: colors.primary };
+    case 'report_returned':
       return { name: 'close-circle-outline', color: '#DC2626' };
     case 'task_assigned':
       return { name: 'calendar-outline', color: colors.primary };
@@ -78,10 +78,16 @@ export default function NotificationBell({ onNavigate }) {
       markRead(item.id);
       setIsOpen(false);
 
-      if (item.type === 'task_submitted') {
-        if (onNavigate) {
-          onNavigate('AdminCalendar', { tab: 'approval' });
-        }
+      if (!onNavigate) return;
+
+      if (item.type === 'report_submitted') {
+        onNavigate('AdminCalendar', {
+          view: 'reports',
+          reportGroupId: item.data?.group_id || null,
+          reportDate: item.data?.report_date || null,
+        });
+      } else if (item.type === 'task_assigned') {
+        onNavigate('AdminCalendar');
       }
     },
     [markRead, onNavigate]

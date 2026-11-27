@@ -145,27 +145,43 @@ export default function ActivityLogsScreen({ navigation }) {
     if (action === 'auth.login') return `${user} logged in`;
     if (action === 'auth.logout') return `${user} logged out`;
     if (action === 'auth.password_changed') return `${user} changed account password`;
+    if (action === 'daily_reports.insert' || action === 'daily_reports.submit') {
+      const rec = item.details?.record || item.details?.new || item.details || {};
+      const dateStr = rec.report_date || '';
+      return `${user} submitted daily report${dateStr ? ` for ${dateStr}` : ''}`;
+    }
+    if (action === 'daily_reports.review' || action === 'daily_reports.update') {
+      const rec = item.details?.record || item.details?.new || item.details || {};
+      const dateStr = rec.report_date || '';
+      if (rec.status === 'reviewed') {
+        return `${user} approved daily report${dateStr ? ` for ${dateStr}` : ''}`;
+      }
+      if (rec.status === 'returned') {
+        return `${user} returned daily report${dateStr ? ` for ${dateStr}` : ''}`;
+      }
+    }
     if (action === 'task_logs.insert' || action === 'task_logs.update' || action === 'task_log.review') {
       const rec = item.details?.record || item.details?.new || item.details || {};
       const status = (rec.status || '').toLowerCase();
-      const reason = rec.review_note || rec.notes || item.details?.review_note || '';
+      const result = (rec.result || '').toLowerCase();
+      const dueDate = rec.due_date || '';
+      const dateSuffix = dueDate ? ` for ${dueDate}` : '';
+      if (status === 'draft' && result === 'issue') {
+        return `${user} reported an issue${dateSuffix}`;
+      }
+      if (status === 'draft') {
+        return `${user} marked completed${dateSuffix}`;
+      }
       if (status === 'submitted') {
-        return `${user} submitted maintenance task for approval`;
+        return `${user} submitted maintenance task${dateSuffix}`;
       }
       if (status === 'done') {
-        return `${user} approved maintenance task`;
+        return `${user} approved maintenance task${dateSuffix}`;
       }
       if (status === 'rejected') {
-        return reason ? `${user} rejected maintenance task: ${reason}` : `${user} rejected maintenance task`;
+        return `${user} returned maintenance task${dateSuffix}`;
       }
-      if (status === 'issue') {
-        return reason ? `${user} reported an issue: ${reason}` : `${user} reported an issue`;
-      }
-      if (status === 'skipped') {
-        return reason ? `${user} skipped maintenance task: ${reason}` : `${user} skipped maintenance task`;
-      }
-      const upperStatus = rec.status ? rec.status.toUpperCase() : 'COMPLETED';
-      return `${user} marked maintenance task as ${upperStatus}`;
+      return `${user} updated maintenance task${dateSuffix}`;
     }
     if (action === 'schedule_rules.insert') return `${user} created a new schedule rule`;
     if (action === 'schedule_rules.update') return `${user} updated a schedule rule`;

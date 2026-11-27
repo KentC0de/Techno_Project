@@ -1,9 +1,18 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+} from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import FrequencyBadge from './FrequencyBadge';
 import TaskStatusChip from './TaskStatusChip';
+import PhotoStrip from './PhotoStrip';
 import WorkerGroupBadge from './WorkerGroupBadge';
+import { fetchRuleDirect, loadTaskContext } from '../lib/dataService';
+import { a11yRole } from '../utils/a11y';
 import { colors } from '../theme';
 
 function timeAgo(isoStr) {
@@ -50,10 +59,7 @@ function isDueToday(dueDateStr) {
   return dueDateStr === todayStr;
 }
 
-function buildLocation(item) {
-  const equipment = item.equipment || item.rule?.equipment;
-  const eqGroup = item.group || equipment?.group || item.rule?.equipment?.group;
-  const category = item.category || eqGroup?.category || item.rule?.equipment?.group?.category;
+function buildLocation(equipment, eqGroup, category) {
   const parts = [];
   if (category) {
     parts.push(`${category.code}. ${category.name}`);
@@ -66,74 +72,226 @@ function buildLocation(item) {
 
 export default function TaskLogCard({
   item,
-  tab = 'approval',
-  isSelected = false,
-  onToggleSelect,
-  onApprove,
-  onReject,
+  tab = 'pending',
   onEditRule,
+  onOpenReport,
+  onRemoveFromQueue,
+  onRetry,
   profilesMap,
 }) {
-  const rule = item.rule || null;
-  const equipment = item.equipment || rule?.equipment || null;
-  const workerGroup = item.worker_group || rule?.worker_group || null;
-  const freq = item.frequency || rule?.frequency || null;
-  const isDeleted = !rule;
+  const log = item.log || item;
+  const initialRule = item.rule || null;
+  const ruleId = log.rule_id || item.rule_id || null;
+  const logId = log.id || item.id || null;
+  const hasInitialRule = !!initialRule;
 
-  const workerName = item.submitterName || (item.done_by && profilesMap ? (profilesMap.get ? profilesMap.get(item.done_by) : profilesMap[item.done_by]) : null) || 'Worker';
-  const approverName = (item.approved_by || item.reviewed_by) && profilesMap
-    ? (profilesMap.get ? profilesMap.get(item.approved_by || item.reviewed_by) : profilesMap[item.approved_by || item.reviewed_by]) || 'Admin'
-    : item.approved_by || item.reviewed_by ? 'Admin' : null;
+  // Direct verification state ONLY when initialRule is null
+  const [ruleCheckState, setRuleCheckState] = useState({
+    status: hasInitialRule ? 'found' : ruleId ? 'checking' : 'missing',
+    error: null,
+    context: null,
+  });
+  const [retryTick, setRetryTick] = useState(0);
 
-  const overdueDays = daysOverdue(item.due_date);
-  const dueToday = isDueToday(item.due_date);
-  const isOverdue = overdueDays > 0 && (item.status === 'pending' || item.status === 'rejected' || item.status === 'submitted');
+  useEffect(() => {
+    if (hasInitialRule) {
+      return;
+    }
 
-  const location = buildLocation(item);
-  const isApproval = tab === 'approval';
-  const isDone = tab === 'done';
+    if (!ruleId) {
+      setRuleCheckState({ status: 'missing', error: null, context: null });
+      return;
+    }
+
+    let cancelled = false;
+    setRuleCheckState({ status: 'checking', error: null, context: null });
+
+    (async () => {
+      try {
+        const { data, error } = await fetchRuleDirect(ruleId);
+        if (cancelled) return;
+
+        if (error) {
+          setRuleCheckState({
+            status: 'error',
+            error: error.message || 'Failed to verify task rule.',
+            context: null,
+          });
+          return;
+        }
+
+        if (!data) {
+          setRuleCheckState({ status: 'missing', error: null, context: null });
+          return;
+        }
+
+        // Rule exists in DB — load full context for this log
+        const contexts = await loadTaskContext([log]);
+        if (cancelled) return;
+        const resolved = contexts[0] || { log, rule: data };
+        setRuleCheckState({
+          status: 'found',
+          error: null,
+          context: resolved,
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setRuleCheckState({
+          status: 'error',
+          error: err?.message || 'Failed to verify task rule.',
+          context: null,
+        });
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hasInitialRule, ruleId, logId, retryTick]);
+
+  const resolvedCtx = !hasInitialRule ? ruleCheckState.context : null;
+  const rule = initialRule || resolvedCtx?.rule || null;
+  const equipment = resolvedCtx?.equipment || item.equipment || rule?.equipment || null;
+  const eqGroup = resolvedCtx?.group || item.group || equipment?.group || null;
+  const category = resolvedCtx?.category || item.category || eqGroup?.category || null;
+  const workerGroup =
+    resolvedCtx?.workerGroup ||
+    item.workerGroup ||
+    item.worker_group ||
+    rule?.worker_group ||
+    null;
+
+  const freq = rule?.frequency || item.frequency || null;
+  const dueDate = log.due_date || item.due_date || '';
+  const status = log.status || item.status || 'pending';
+
+  const lookupProfileName = (personId) => {
+    if (!personId || !profilesMap) return null;
+    return profilesMap.get ? profilesMap.get(personId) : profilesMap[personId];
+  };
+
+  const workerName =
+    resolvedCtx?.worker?.full_name ||
+    item.worker?.full_name ||
+    item.submitterName ||
+    lookupProfileName(log.done_by) ||
+    'Worker';
+
+  const approverId = log.approved_by || log.reviewed_by;
+  const approverName =
+    resolvedCtx?.approver?.full_name ||
+    item.approver?.full_name ||
+    item.approverName ||
+    lookupProfileName(approverId) ||
+    (approverId ? 'Admin' : null);
+
+  const workerNote = item.log
+    ? item.log.notes
+    : status === 'pending'
+    ? null
+    : log.notes || item.notes;
+
+  const overdueDays = daysOverdue(dueDate);
+  const dueToday = isDueToday(dueDate);
+  const isOverdue =
+    overdueDays > 0 &&
+    (status === 'pending' || status === 'rejected' || status === 'submitted');
+
+  const location = buildLocation(equipment, eqGroup, category);
+  const isReported = tab === 'reported';
   const isPending = tab === 'pending';
 
-  if (isDeleted) {
+  if (!rule) {
+    if (ruleCheckState.status === 'checking') {
+      return (
+        <View style={[styles.card, styles.checkingCard]}>
+          <View style={styles.deletedRow}>
+            <ActivityIndicator size="small" color={colors.primary} />
+            <Text style={styles.checkingText}>Checking task details...</Text>
+          </View>
+          <Text style={styles.deletedSub}>
+            Due {dueDate} • Submitted by {workerName}
+          </Text>
+        </View>
+      );
+    }
+
+    if (ruleCheckState.status === 'error') {
+      return (
+        <View style={[styles.card, styles.errorCard]}>
+          <View style={styles.deletedRow}>
+            <Ionicons name="alert-circle" size={18} color="#DC2626" />
+            <Text style={styles.errorText}>{ruleCheckState.error}</Text>
+          </View>
+          <Text style={styles.deletedSub}>
+            Due {dueDate} • Submitted by {workerName}
+          </Text>
+          <View style={styles.actionsRow}>
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.retryBtn]}
+              onPress={() => {
+                setRetryTick((t) => t + 1);
+                if (onRetry) onRetry();
+              }}
+              activeOpacity={0.8}
+              {...a11yRole('button')}
+            >
+              <Ionicons name="refresh-outline" size={15} color={colors.white} />
+              <Text style={styles.retryBtnText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      );
+    }
+
+    // Confirmed: direct query returned data = null and error = null
     return (
       <View style={[styles.card, styles.deletedCard]}>
         <View style={styles.deletedRow}>
-          <Ionicons name="trash-outline" size={18} color={colors.textMuted} />
-          <Text style={styles.deletedText}>This task was deleted</Text>
+          <Ionicons name="trash-outline" size={18} color={colors.textSecondary} />
+          <Text style={styles.deletedText}>This task is no longer available</Text>
         </View>
         <Text style={styles.deletedSub}>
-          Due: {item.due_date} • Submitted by {workerName}
+          Due {dueDate} • {status === 'submitted' ? `Submitted by ${workerName}` : workerName}
         </Text>
+        {onRemoveFromQueue && logId ? (
+          <View style={styles.actionsRow}>
+            <TouchableOpacity
+              style={[styles.actionBtn, styles.removeQueueBtn]}
+              onPress={() => onRemoveFromQueue(item)}
+              activeOpacity={0.8}
+              {...a11yRole('button')}
+            >
+              <Ionicons name="trash-outline" size={15} color="#DC2626" />
+              <Text style={styles.removeQueueBtnText}>Remove from queue</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
       </View>
     );
   }
+
+  const workerGroupForBadge =
+    workerGroup ||
+    (rule.worker_group_id
+      ? { id: rule.worker_group_id, name: 'Assigned Group', color: colors.primary }
+      : null);
+
+  const isEquipmentInactive = equipment && equipment.is_active === false;
 
   return (
     <View
       style={[
         styles.card,
-        isSelected && styles.cardSelected,
         isOverdue && styles.cardOverdue,
       ]}
     >
-      {/* Top row: checkbox, freq badge, equipment name, status chip */}
+      {/* Top row: freq badge, equipment name, status chip */}
       <View style={styles.topRow}>
         <View style={styles.topLeft}>
-          {isApproval && (
-            <TouchableOpacity
-              onPress={() => onToggleSelect && onToggleSelect(item.id)}
-              style={styles.checkboxTouch}
-            >
-              <Ionicons
-                name={isSelected ? 'checkbox' : 'square-outline'}
-                size={20}
-                color={isSelected ? colors.primary : '#A1A1AA'}
-              />
-            </TouchableOpacity>
-          )}
-          <FrequencyBadge freq={freq} size="medium" />
+          {freq ? <FrequencyBadge freq={freq} size="medium" /> : null}
           <View style={styles.nameCol}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 6 }}>
+            <View style={styles.equipNameRow}>
               <Text style={styles.equipName}>
                 {equipment?.name || 'Equipment'}
               </Text>
@@ -142,15 +300,18 @@ export default function TaskLogCard({
                   <Text style={styles.areaChipText}>{equipment.area}</Text>
                 </View>
               ) : null}
+              {isEquipmentInactive ? (
+                <View style={styles.inactiveChip}>
+                  <Text style={styles.inactiveChipText}>Inactive</Text>
+                </View>
+              ) : null}
             </View>
           </View>
         </View>
         <View style={styles.topRight}>
-          <TaskStatusChip status={item.status || 'pending'} />
-          <Text style={styles.dueDateText}>Due: {item.due_date}</Text>
-          {dueToday && (
-            <Text style={styles.dueTodayBadge}>Due today</Text>
-          )}
+          <TaskStatusChip status={status} />
+          <Text style={styles.dueDateText}>Due {dueDate}</Text>
+          {dueToday && <Text style={styles.dueTodayBadge}>Due today</Text>}
           {isOverdue && (
             <Text style={styles.overdueBadge}>
               Overdue by {overdueDays} day{overdueDays !== 1 ? 's' : ''}
@@ -161,51 +322,66 @@ export default function TaskLogCard({
 
       {/* Location line: Category > Group */}
       {location ? (
-        <Text style={styles.locationText} numberOfLines={1}>{location}</Text>
+        <Text style={styles.locationText} numberOfLines={1}>
+          {location}
+        </Text>
       ) : null}
 
       {/* Worker Group */}
       <View style={styles.groupRow}>
         <Text style={styles.groupLabel}>Worker Group:</Text>
-        <WorkerGroupBadge group={workerGroup} />
+        <WorkerGroupBadge group={workerGroupForBadge} />
       </View>
 
       {/* Submitted info */}
-      {item.status === 'submitted' && (
+      {status === 'submitted' && (
         <View style={styles.infoRow}>
-          <Ionicons name="time-outline" size={14} color="#0284C7" />
+          <Ionicons name="time-outline" size={14} color={colors.primaryDark} />
           <Text style={styles.infoText}>
             Submitted by <Text style={styles.bold}>{workerName}</Text>
-            {' - '}{timeAgo(item.submitted_at || item.done_at)}
+            {' - '}
+            {timeAgo(log.submitted_at || log.done_at)}
           </Text>
         </View>
       )}
-      {item.status === 'submitted' && (item.submitted_at || item.done_at) && (
+      {status === 'submitted' && (log.submitted_at || log.done_at) ? (
         <Text style={styles.timestampDetail}>
-          {formatDateTime(item.submitted_at || item.done_at)}
+          {formatDateTime(log.submitted_at || log.done_at)}
         </Text>
-      )}
+      ) : null}
 
       {/* Done info */}
-      {item.status === 'done' && (
+      {status === 'done' && (
         <View style={styles.infoRow}>
-          <Ionicons name="checkmark-circle" size={14} color="#15803D" />
+          <Ionicons name="checkmark-circle" size={14} color={colors.primaryDark} />
           <Text style={styles.infoText}>
             Done by <Text style={styles.bold}>{workerName}</Text>
             {approverName ? ` - approved by ${approverName}` : ' - Approved'}
-            {item.approved_at || item.reviewed_at
-              ? ` at ${formatDateTime(item.approved_at || item.reviewed_at)}`
+            {log.approved_at || log.reviewed_at
+              ? ` at ${formatDateTime(log.approved_at || log.reviewed_at)}`
               : ''}
           </Text>
         </View>
       )}
 
+      {/* Issue info */}
+      {(log.result === 'issue' || status === 'issue') && log.done_by ? (
+        <View style={styles.infoRow}>
+          <Ionicons name="warning-outline" size={14} color="#D97706" />
+          <Text style={styles.infoText}>
+            Reported by <Text style={styles.bold}>{workerName}</Text>
+            {log.done_at ? ` - ${timeAgo(log.done_at)}` : ''}
+            {log.issue_resolved_at ? ' • Resolved' : ' • Unresolved'}
+          </Text>
+        </View>
+      ) : null}
+
       {/* Rejected info */}
-      {item.status === 'rejected' && (
+      {status === 'rejected' && (
         <View style={styles.rejectionBox}>
           <Ionicons name="close-circle" size={14} color="#DC2626" />
           <Text style={styles.rejectionText}>
-            Rejected: {item.review_note || 'Please redo this task.'}
+            Rejected: {log.review_note || 'Please redo this task.'}
           </Text>
         </View>
       )}
@@ -213,49 +389,48 @@ export default function TaskLogCard({
       {/* Worker note */}
       <View style={styles.noteBox}>
         <Ionicons
-          name={item.notes ? 'chatbubble-ellipses-outline' : 'document-text-outline'}
+          name={workerNote ? 'chatbubble-ellipses-outline' : 'document-text-outline'}
           size={14}
-          color={item.notes ? colors.textSecondary : colors.textMuted}
+          color={workerNote ? colors.textSecondary : colors.textMuted}
         />
-        <Text style={[styles.noteText, !item.notes && styles.noteTextEmpty]}>
-          {item.notes || 'No note'}
+        <Text style={[styles.noteText, !workerNote && styles.noteTextEmpty]}>
+          {workerNote || 'No note'}
         </Text>
       </View>
+      <PhotoStrip
+        paths={log.photo_paths}
+        title={equipment?.name || 'Equipment'}
+        subtitle={log.done_at ? `Recorded ${new Date(log.done_at).toLocaleString()}` : undefined}
+      />
 
       {/* Action buttons */}
-      {isApproval && (
+      {isReported && onOpenReport ? (
         <View style={styles.actionsRow}>
           <TouchableOpacity
             style={[styles.actionBtn, styles.approveBtn]}
-            onPress={() => onApprove && onApprove(item.id, equipment?.name)}
+            onPress={() => onOpenReport(item)}
             activeOpacity={0.8}
+            {...a11yRole('button')}
           >
-            <Ionicons name="checkmark" size={16} color={colors.white} />
-            <Text style={styles.approveBtnText}>Approve</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.actionBtn, styles.rejectBtn]}
-            onPress={() => onReject && onReject(item)}
-            activeOpacity={0.8}
-          >
-            <Ionicons name="close" size={16} color="#DC2626" />
-            <Text style={styles.rejectBtnText}>Reject</Text>
+            <Ionicons name="document-text-outline" size={16} color={colors.white} />
+            <Text style={styles.approveBtnText}>Open report</Text>
           </TouchableOpacity>
         </View>
-      )}
+      ) : null}
 
-      {isPending && onEditRule && rule && (
+      {isPending && onEditRule && rule ? (
         <View style={styles.actionsRow}>
           <TouchableOpacity
             style={[styles.actionBtn, styles.editRuleBtn]}
             onPress={() => onEditRule(rule)}
             activeOpacity={0.8}
+            {...a11yRole('button')}
           >
             <Ionicons name="create-outline" size={16} color={colors.primaryDark} />
             <Text style={styles.editRuleBtnText}>Edit Rule & Workers</Text>
           </TouchableOpacity>
         </View>
-      )}
+      ) : null}
     </View>
   );
 }
@@ -266,8 +441,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: colors.border,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingTop: 14,
+    paddingBottom: 14,
+    paddingLeft: 16,
+    paddingRight: 16,
     marginBottom: 10,
   },
   cardSelected: {
@@ -275,12 +452,31 @@ const styles = StyleSheet.create({
     backgroundColor: '#F0F9FF',
   },
   cardOverdue: {
-    borderColor: '#F59E0B',
-    backgroundColor: '#FFFBEB',
+    borderColor: colors.dark,
+    backgroundColor: '#F8FAFC',
+  },
+  checkingCard: {
+    backgroundColor: '#F8FAFC',
+    borderColor: colors.border,
+  },
+  checkingText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: colors.textSecondary,
+  },
+  errorCard: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FECACA',
+  },
+  errorText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#DC2626',
+    flex: 1,
   },
   deletedCard: {
-    backgroundColor: '#F9FAFB',
-    borderColor: '#E5E7EB',
+    backgroundColor: '#F8FAFC',
+    borderColor: colors.border,
   },
   deletedRow: {
     flexDirection: 'row',
@@ -291,12 +487,33 @@ const styles = StyleSheet.create({
   deletedText: {
     fontSize: 14,
     fontWeight: '600',
-    color: colors.textMuted,
+    color: colors.dark,
   },
   deletedSub: {
     fontSize: 12,
-    color: colors.textMuted,
+    color: colors.textSecondary,
     marginLeft: 26,
+    marginBottom: 6,
+  },
+  retryBtn: {
+    backgroundColor: '#DC2626',
+    marginTop: 4,
+  },
+  retryBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: colors.white,
+  },
+  removeQueueBtn: {
+    backgroundColor: colors.white,
+    borderWidth: 1,
+    borderColor: '#FECACA',
+    marginTop: 4,
+  },
+  removeQueueBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#DC2626',
   },
   topRow: {
     flexDirection: 'row',
@@ -316,6 +533,12 @@ const styles = StyleSheet.create({
   nameCol: {
     flex: 1,
   },
+  equipNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
   equipName: {
     fontSize: 15,
     fontWeight: '700',
@@ -324,15 +547,30 @@ const styles = StyleSheet.create({
   areaChip: {
     backgroundColor: '#F1F5F9',
     borderRadius: 4,
-    paddingHorizontal: 6,
-    paddingVertical: 1,
+    paddingLeft: 6,
+    paddingRight: 6,
+    paddingTop: 2,
+    paddingBottom: 2,
     alignSelf: 'flex-start',
-    marginTop: 2,
   },
   areaChipText: {
     fontSize: 11,
     fontWeight: '600',
     color: colors.textSecondary,
+  },
+  inactiveChip: {
+    backgroundColor: colors.dark,
+    borderRadius: 4,
+    paddingLeft: 6,
+    paddingRight: 6,
+    paddingTop: 2,
+    paddingBottom: 2,
+    alignSelf: 'flex-start',
+  },
+  inactiveChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: colors.white,
   },
   topRight: {
     alignItems: 'flex-end',
@@ -352,7 +590,7 @@ const styles = StyleSheet.create({
   overdueBadge: {
     fontSize: 11,
     fontWeight: '700',
-    color: '#D97706',
+    color: colors.dark,
   },
   locationText: {
     fontSize: 12,
@@ -397,15 +635,17 @@ const styles = StyleSheet.create({
     gap: 6,
     backgroundColor: '#FEF2F2',
     borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingLeft: 10,
+    paddingRight: 10,
+    paddingTop: 6,
+    paddingBottom: 6,
     marginBottom: 6,
     borderWidth: 1,
     borderColor: '#FECACA',
   },
   rejectionText: {
     fontSize: 13,
-    color: '#991B1B',
+    color: '#DC2626',
     flex: 1,
   },
   noteBox: {
@@ -414,11 +654,13 @@ const styles = StyleSheet.create({
     gap: 6,
     backgroundColor: '#F8FAFC',
     borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingLeft: 10,
+    paddingRight: 10,
+    paddingTop: 6,
+    paddingBottom: 6,
     marginBottom: 8,
     borderWidth: 1,
-    borderColor: '#E2E8F0',
+    borderColor: colors.border,
   },
   noteText: {
     fontSize: 13,
@@ -438,8 +680,10 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
+    paddingLeft: 14,
+    paddingRight: 14,
+    paddingTop: 8,
+    paddingBottom: 8,
     borderRadius: 8,
   },
   approveBtn: {
@@ -471,4 +715,3 @@ const styles = StyleSheet.create({
     color: colors.primaryDark,
   },
 });
-

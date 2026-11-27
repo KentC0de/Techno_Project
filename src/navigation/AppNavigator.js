@@ -26,6 +26,7 @@ import MaintenanceScreen from '../screens/auth/MaintenanceScreen';
 // Worker screens
 import ChooseWorkScreen from '../screens/worker/ChooseWorkScreen';
 import TodayScreen from '../screens/worker/TodayScreen';
+import WorkerReportScreen from '../screens/worker/WorkerReportScreen';
 
 // Admin screens
 import ScheduleCalendarScreen from '../screens/admin/ScheduleCalendarScreen';
@@ -63,6 +64,8 @@ const webLinking = {
         path: '',
         screens: {
           AdminCalendar: 'admin/calendar',
+          ReportsList: 'admin/reports',
+          ReportDetail: 'admin/reports/detail',
           SetSchedule: 'admin/set-schedule',
           AssignWorkers: 'admin/assign-workers',
           ManageEquipment: 'admin/equipment',
@@ -78,6 +81,7 @@ const webLinking = {
         screens: {
           WorkerTodayTab: 'today',
           ChooseWorkTab: 'my-system',
+          WorkerReportTab: 'report',
           ProfileTab: 'profile',
         },
       },
@@ -100,6 +104,7 @@ const mobileLinking = {
         screens: {
           WorkerTodayTab: 'today',
           ChooseWorkTab: 'my-system',
+          WorkerReportTab: 'report',
           ProfileTab: 'profile',
         },
       },
@@ -222,12 +227,14 @@ function WorkerTabNavigator() {
         tabBarStyle: {
           backgroundColor: colors.white,
           borderTopColor: colors.border,
-          height: (Platform.OS === 'ios' ? 56 : 56) + bottomInset,
+          borderTopLeftRadius: 20,
+          borderTopRightRadius: 20,
+          height: 60 + bottomInset,
           paddingBottom: Math.max(bottomInset, 8),
-          paddingTop: 6,
+          paddingTop: 8,
         },
         tabBarLabelStyle: {
-          fontSize: 11,
+          fontSize: 12,
           fontWeight: '700',
         },
         tabBarIcon: ({ color, size, focused }) => {
@@ -236,6 +243,8 @@ function WorkerTabNavigator() {
             iconName = focused ? 'today' : 'today-outline';
           } else if (route.name === 'ChooseWorkTab') {
             iconName = focused ? 'grid' : 'grid-outline';
+          } else if (route.name === 'WorkerReportTab') {
+            iconName = focused ? 'document-text' : 'document-text-outline';
           } else if (route.name === 'ProfileTab') {
             iconName = focused ? 'person' : 'person-outline';
           }
@@ -252,6 +261,11 @@ function WorkerTabNavigator() {
         name="ChooseWorkTab"
         component={ChooseWorkScreen}
         options={{ tabBarLabel: 'My System' }}
+      />
+      <Tab.Screen
+        name="WorkerReportTab"
+        component={WorkerReportScreen}
+        options={{ tabBarLabel: 'Report' }}
       />
       <Tab.Screen
         name="ProfileTab"
@@ -275,7 +289,48 @@ function withPageBoundary(Component, pageName) {
   };
 }
 
+function ReportsRedirectStub({ navigation, route }) {
+  const hasNavigated = React.useRef(false);
+  useEffect(() => {
+    if (hasNavigated.current) return;
+    hasNavigated.current = true;
+    try {
+      const state = navigation.getState();
+      const routeNames = state?.routeNames || [];
+      const reportGroupId = route?.params?.reportGroupId || route?.params?.groupId || null;
+      const reportDate = route?.params?.reportDate || route?.params?.date || null;
+
+      if (routeNames.includes('AdminCalendar')) {
+        navigation.replace('AdminCalendar', {
+          view: 'reports',
+          reportGroupId,
+          reportDate,
+        });
+      } else {
+        navigation.navigate('AdminRoot', {
+          screen: 'AdminCalendar',
+          params: { view: 'reports', reportGroupId, reportDate },
+        });
+      }
+    } catch (_) {
+      try {
+        navigation.navigate('AdminCalendar', { view: 'reports' });
+      } catch (err) {
+        if (__DEV__) console.warn('Redirect stub error:', err);
+      }
+    }
+  }, [navigation, route]);
+
+  return (
+    <View style={{ flex: 1, backgroundColor: colors.white, justifyContent: 'center', alignItems: 'center' }}>
+      <ActivityIndicator size="small" color={colors.primary} />
+    </View>
+  );
+}
+
 const SafeScheduleCalendar = withPageBoundary(ScheduleCalendarScreen, 'Schedule Calendar');
+const SafeReportsList      = withPageBoundary(ReportsRedirectStub,    'Reports');
+const SafeReportDetail     = withPageBoundary(ReportsRedirectStub,    'Report Detail');
 const SafeSetSchedule      = withPageBoundary(SetScheduleScreen,      'Set Schedule');
 const SafeAssignWorkers    = withPageBoundary(AssignWorkersScreen,    'Assign Workers');
 const SafeManageEquipment  = withPageBoundary(ManageEquipmentScreen,  'Equipment & Systems');
@@ -359,6 +414,8 @@ function ResponsiveAdminLayout({ navigation }) {
           }}
         >
           <AdminWebStack.Screen name="AdminCalendar" component={SafeScheduleCalendar} />
+          <AdminWebStack.Screen name="ReportsList" component={SafeReportsList} />
+          <AdminWebStack.Screen name="ReportDetail" component={SafeReportDetail} />
           <AdminWebStack.Screen name="SetSchedule" component={SafeSetSchedule} />
           <AdminWebStack.Screen name="AssignWorkers" component={SafeAssignWorkers} />
           <AdminWebStack.Screen name="ManageEquipment" component={SafeManageEquipment} />

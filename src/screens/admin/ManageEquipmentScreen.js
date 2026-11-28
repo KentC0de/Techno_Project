@@ -1164,7 +1164,7 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   eqRowCardInactive: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     opacity: 0.7,
   },
   eqDetails: {
@@ -1183,9 +1183,9 @@ const styles = StyleSheet.create({
     color: colors.dark,
   },
   areaChip: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -1193,7 +1193,7 @@ const styles = StyleSheet.create({
   areaChipText: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#0369A1',
+    color: '#1C5089',
   },
   textMuted: {
     color: colors.textMuted,

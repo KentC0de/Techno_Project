@@ -209,11 +209,11 @@ const styles = StyleSheet.create({
     borderBottomColor: '#F1F5F9',
   },
   workerRowSelected: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   workerRowDisabled: {
     opacity: 0.5,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
   },
   workerRowLeft: {
     flexDirection: 'row',

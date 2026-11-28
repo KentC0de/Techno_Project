@@ -168,7 +168,7 @@ export default function FilterButton({
                   hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
                   style={styles.chipRemoveBtn}
                 >
-                  <Ionicons name="close" size={14} color="#0369A1" />
+                  <Ionicons name="close" size={14} color="#1C5089" />
                 </TouchableOpacity>
               </View>
             ))}
@@ -236,7 +236,7 @@ const styles = StyleSheet.create({
   },
   buttonActive: {
     borderColor: colors.primary,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   buttonText: {
     fontSize: 14,
@@ -269,9 +269,9 @@ const styles = StyleSheet.create({
   activeChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#E0F2FE',
+    backgroundColor: '#EAF2FA',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
     borderRadius: 16,
     paddingVertical: 4,
     paddingHorizontal: 10,
@@ -280,7 +280,7 @@ const styles = StyleSheet.create({
   activeChipText: {
     fontSize: 12,
     fontWeight: '500',
-    color: '#0369A1',
+    color: '#1C5089',
     maxWidth: 160,
   },
   chipRemoveBtn: {

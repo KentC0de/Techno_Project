@@ -203,7 +203,7 @@ export default function PerformanceScreen({ navigation }) {
               </View>
 
               <View style={styles.metricCard}>
-                <Ionicons name="time" size={24} color="#0284C7" />
+                <Ionicons name="time" size={24} color="#1C5089" />
                 <Text style={styles.metricVal}>{overallPerf.waiting}</Text>
                 <Text style={styles.metricLabel}>Waiting for review</Text>
               </View>

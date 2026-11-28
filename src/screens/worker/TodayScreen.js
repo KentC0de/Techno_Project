@@ -764,7 +764,7 @@ export default function TodayScreen({ navigation, route }) {
 
         {!myGroup ? (
           <View style={styles.noGroupBanner}>
-            <Ionicons name="information-circle-outline" size={16} color="#0284C7" />
+            <Ionicons name="information-circle-outline" size={16} color="#1C5089" />
             <Text style={styles.noGroupBannerText}>Not in a worker group. Ask your admin.</Text>
           </View>
         ) : null}
@@ -1242,7 +1242,7 @@ const styles = StyleSheet.create({
     marginTop: 14,
     overflow: 'hidden',
   },
-  heroFill: { height: 6, borderRadius: 3, backgroundColor: '#0EA5E9' },
+  heroFill: { height: 6, borderRadius: 3, backgroundColor: '#2563A6' },
   heroBottom: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 10 },
   heroMeta: { fontSize: 14, color: '#D1D5DB' },
   monthRow: {
@@ -1364,7 +1364,7 @@ const styles = StyleSheet.create({
   pageSubtitle: {
     fontSize: 14,
     fontWeight: '600',
-    color: colors.primaryDark || '#0284C7',
+    color: colors.primaryDark || '#1C5089',
     marginTop: 2,
   },
   content: {
@@ -1417,7 +1417,7 @@ const styles = StyleSheet.create({
     color: colors.white,
   },
   teamInfoBanner: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderRadius: 10,
     borderWidth: 1,
     borderColor: '#E2E8F0',
@@ -1439,17 +1439,17 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
     padding: 10,
     marginBottom: 12,
   },
   noGroupBannerText: {
     flex: 1,
     fontSize: 11,
-    color: '#0369A1',
+    color: '#1C5089',
     fontWeight: '600',
   },
   weekStripContainer: {
@@ -1769,8 +1769,8 @@ const styles = StyleSheet.create({
     borderColor: '#E4E4E7',
   },
   filterChipActive: {
-    backgroundColor: '#E0F2FE',
-    borderColor: '#0EA5E9',
+    backgroundColor: '#EAF2FA',
+    borderColor: '#2563A6',
   },
   filterChipText: {
     fontSize: 12,
@@ -1778,13 +1778,13 @@ const styles = StyleSheet.create({
     color: '#52525B',
   },
   filterChipTextActive: {
-    color: '#0284C7',
+    color: '#1C5089',
     fontWeight: '700',
   },
   diagContainer: {
     marginTop: 24,
     marginBottom: 20,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderWidth: 1,
     borderColor: '#CBD5E1',
     borderRadius: 10,

@@ -298,7 +298,7 @@ const styles = StyleSheet.create({
     width: 80,
     height: 80,
     borderRadius: 40,
-    backgroundColor: colors.primaryVeryLight || '#E0F2FE',
+    backgroundColor: colors.primaryVeryLight || '#EAF2FA',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 24,

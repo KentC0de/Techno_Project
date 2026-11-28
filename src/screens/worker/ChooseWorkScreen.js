@@ -416,13 +416,13 @@ const styles = StyleSheet.create({
   },
   systemCardActive: {
     borderColor: colors.primary,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   iconBox: {
     width: 48,
     height: 48,
     borderRadius: 12,
-    backgroundColor: '#E0F2FE',
+    backgroundColor: '#EAF2FA',
     alignItems: 'center',
     justifyContent: 'center',
     marginRight: 16,
@@ -440,7 +440,7 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   systemNameActive: {
-    color: colors.primaryDark || '#0284C7',
+    color: colors.primaryDark || '#1C5089',
   },
   systemCode: {
     fontSize: 12,

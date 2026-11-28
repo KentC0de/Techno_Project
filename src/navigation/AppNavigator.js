@@ -33,6 +33,8 @@ import ScheduleCalendarScreen from '../screens/admin/ScheduleCalendarScreen';
 import SetScheduleScreen from '../screens/admin/SetScheduleScreen';
 import ManageEquipmentScreen from '../screens/admin/ManageEquipmentScreen';
 import PerformanceScreen from '../screens/admin/PerformanceScreen';
+import SiteMapScreen from '../screens/admin/SiteMapScreen';
+import DashboardScreen from '../screens/admin/DashboardScreen';
 import UsersScreen from '../screens/admin/UsersScreen';
 import ActivityLogsScreen from '../screens/admin/ActivityLogsScreen';
 import SettingsScreen from '../screens/admin/SettingsScreen';
@@ -63,6 +65,7 @@ const webLinking = {
       AdminRoot: {
         path: '',
         screens: {
+          Dashboard: 'admin/dashboard',
           AdminCalendar: 'admin/calendar',
           ReportsList: 'admin/reports',
           ReportDetail: 'admin/reports/detail',
@@ -70,6 +73,7 @@ const webLinking = {
           AssignWorkers: 'admin/assign-workers',
           ManageEquipment: 'admin/equipment',
           Performance: 'admin/performance',
+          SiteMap: 'admin/site-map',
           Users: 'admin/users',
           ActivityLogs: 'admin/activity',
           Settings: 'admin/settings',
@@ -328,6 +332,7 @@ function ReportsRedirectStub({ navigation, route }) {
   );
 }
 
+const SafeDashboard        = withPageBoundary(DashboardScreen,        'Dashboard');
 const SafeScheduleCalendar = withPageBoundary(ScheduleCalendarScreen, 'Schedule Calendar');
 const SafeReportsList      = withPageBoundary(ReportsRedirectStub,    'Reports');
 const SafeReportDetail     = withPageBoundary(ReportsRedirectStub,    'Report Detail');
@@ -335,6 +340,7 @@ const SafeSetSchedule      = withPageBoundary(SetScheduleScreen,      'Set Sched
 const SafeAssignWorkers    = withPageBoundary(AssignWorkersScreen,    'Assign Workers');
 const SafeManageEquipment  = withPageBoundary(ManageEquipmentScreen,  'Equipment & Systems');
 const SafePerformance      = withPageBoundary(PerformanceScreen,      'Performance Report');
+const SafeSiteMap          = withPageBoundary(SiteMapScreen,          'Site Map');
 const SafeUsers            = withPageBoundary(UsersScreen,            'User Roles');
 const SafeActivityLogs     = withPageBoundary(ActivityLogsScreen,     'Activity Logs');
 const SafeSettings         = withPageBoundary(SettingsScreen,         'Settings');
@@ -348,7 +354,7 @@ function ResponsiveAdminLayout({ navigation }) {
   const isDesktop = width >= 768;
   const isNarrow = width < 900;
   const { sidebarOpen, closeSidebar } = useSidebar();
-  const [activeTab, setActiveTab] = useState('AdminCalendar');
+  const [activeTab, setActiveTab] = useState('Dashboard');
 
   // Persist visited tab for reload on root "/"
   const handleStateChange = useCallback((state) => {
@@ -407,12 +413,13 @@ function ResponsiveAdminLayout({ navigation }) {
 
       <View style={styles.webMainContent}>
         <AdminWebStack.Navigator
-          initialRouteName="AdminCalendar"
+          initialRouteName="Dashboard"
           screenOptions={{ headerShown: false }}
           screenListeners={{
             state: (e) => handleStateChange(e.data?.state),
           }}
         >
+          <AdminWebStack.Screen name="Dashboard" component={SafeDashboard} />
           <AdminWebStack.Screen name="AdminCalendar" component={SafeScheduleCalendar} />
           <AdminWebStack.Screen name="ReportsList" component={SafeReportsList} />
           <AdminWebStack.Screen name="ReportDetail" component={SafeReportDetail} />
@@ -420,6 +427,7 @@ function ResponsiveAdminLayout({ navigation }) {
           <AdminWebStack.Screen name="AssignWorkers" component={SafeAssignWorkers} />
           <AdminWebStack.Screen name="ManageEquipment" component={SafeManageEquipment} />
           <AdminWebStack.Screen name="Performance" component={SafePerformance} />
+          <AdminWebStack.Screen name="SiteMap" component={SafeSiteMap} />
           <AdminWebStack.Screen name="Users" component={SafeUsers} />
           <AdminWebStack.Screen name="ActivityLogs" component={SafeActivityLogs} />
           <AdminWebStack.Screen name="Settings" component={SafeSettings} />

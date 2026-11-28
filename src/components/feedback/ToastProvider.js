@@ -231,7 +231,7 @@ const styles = StyleSheet.create({
     position: 'relative',
   },
   cardSuccess: {
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
   },
   cardError: {
     borderColor: '#FECACA',

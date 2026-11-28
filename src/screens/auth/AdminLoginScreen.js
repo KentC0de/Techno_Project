@@ -138,7 +138,7 @@ export default function AdminLoginScreen({ navigation, route }) {
           )}
           {/* Linear gradient overlay (or fallback if image missing) */}
           <LinearGradient
-            colors={['#0A0A0A', '#0EA5E9']}
+            colors={['#0A0A0A', '#2563A6']}
             start={{ x: 0, y: 0 }}
             end={{ x: 1, y: 1 }}
             style={[StyleSheet.absoluteFill, { opacity: loginBg ? 0.6 : 1 }]}

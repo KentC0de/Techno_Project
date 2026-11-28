@@ -449,14 +449,14 @@ const styles = StyleSheet.create({
   },
   cardSelected: {
     borderColor: colors.primary,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   cardOverdue: {
     borderColor: colors.dark,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
   },
   checkingCard: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderColor: colors.border,
   },
   checkingText: {
@@ -475,7 +475,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   deletedCard: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderColor: colors.border,
   },
   deletedRow: {
@@ -652,7 +652,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-start',
     gap: 6,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderRadius: 8,
     paddingLeft: 10,
     paddingRight: 10,
@@ -705,9 +705,9 @@ const styles = StyleSheet.create({
     color: '#DC2626',
   },
   editRuleBtn: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
   },
   editRuleBtnText: {
     fontSize: 13,

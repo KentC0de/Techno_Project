@@ -9,7 +9,7 @@ import { Platform } from 'react-native';
  */
 export function getHomeRoute(role, platform = Platform.OS) {
   if (role === 'admin' && platform === 'web') {
-    return { name: 'AdminRoot', params: { screen: 'AdminCalendar' } };
+    return { name: 'AdminRoot', params: { screen: 'Dashboard' } };
   }
   if (role === 'admin') {
     return { name: 'AdminRoot', params: { screen: 'AdminCalendar' } };

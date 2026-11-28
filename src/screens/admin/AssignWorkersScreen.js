@@ -27,7 +27,7 @@ import { supabase } from '../../lib/supabase';
 import { colors, layout } from '../../theme';
 
 const COLOR_PRESETS = [
-  '#0EA5E9', // Sky blue (default theme)
+  '#2563A6', // Sky blue (default theme)
   '#10B981', // Emerald
   '#F59E0B', // Amber
   '#8B5CF6', // Purple
@@ -94,7 +94,7 @@ export default function AssignWorkersScreen({ navigation }) {
   // Group Form State
   const [formName, setFormName] = useState('');
   const [formDesc, setFormDesc] = useState('');
-  const [formColor, setFormColor] = useState('#0EA5E9');
+  const [formColor, setFormColor] = useState('#2563A6');
   const [formShiftLabel, setFormShiftLabel] = useState('');
   const [formShiftStart, setFormShiftStart] = useState('08:00');
   const [formShiftEnd, setFormShiftEnd] = useState('17:00');
@@ -122,7 +122,7 @@ export default function AssignWorkersScreen({ navigation }) {
     if (activeGroup && !isCreatingNew) {
       setFormName(activeGroup.name || '');
       setFormDesc(activeGroup.description || '');
-      setFormColor(activeGroup.color || '#0EA5E9');
+      setFormColor(activeGroup.color || '#2563A6');
       setFormShiftLabel(activeGroup.shift_label || '');
       setFormShiftStart(activeGroup.shift_start ? activeGroup.shift_start.slice(0, 5) : '08:00');
       setFormShiftEnd(activeGroup.shift_end ? activeGroup.shift_end.slice(0, 5) : '17:00');
@@ -170,7 +170,7 @@ export default function AssignWorkersScreen({ navigation }) {
     setSelectedGroupId(null);
     setFormName('');
     setFormDesc('');
-    setFormColor('#0EA5E9');
+    setFormColor('#2563A6');
     setFormShiftLabel('');
     setFormShiftStart('08:00');
     setFormShiftEnd('17:00');
@@ -204,7 +204,7 @@ export default function AssignWorkersScreen({ navigation }) {
     const payload = {
       name: formName.trim(),
       description: formDesc.trim() || null,
-      color: formColor || '#0EA5E9',
+      color: formColor || '#2563A6',
       shift_label: formShiftLabel.trim() || null,
       shift_start: formShiftStart ? `${formShiftStart}:00` : null,
       shift_end: formShiftEnd ? `${formShiftEnd}:00` : null,
@@ -619,7 +619,7 @@ export default function AssignWorkersScreen({ navigation }) {
             {/* Unassigned Workers Count Banner */}
             {unassignedWorkers.length > 0 && (
               <View style={styles.unassignedBanner}>
-                <Ionicons name="alert-circle-outline" size={16} color="#0284C7" />
+                <Ionicons name="alert-circle-outline" size={16} color="#1C5089" />
                 <Text style={styles.unassignedBannerText}>
                   {unassignedWorkers.length} active worker(s) without a group
                 </Text>
@@ -713,7 +713,7 @@ export default function AssignWorkersScreen({ navigation }) {
                         style={styles.hexInput}
                         value={formColor}
                         onChangeText={setFormColor}
-                        placeholder="#0EA5E9"
+                        placeholder="#2563A6"
                         maxLength={7}
                       />
                     </View>
@@ -1078,7 +1078,7 @@ const styles = StyleSheet.create({
   },
   groupCardSelected: {
     borderColor: colors.primary,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   groupCardInactive: {
     opacity: 0.6,
@@ -1149,7 +1149,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   dayChipActive: {
-    backgroundColor: '#0EA5E9',
+    backgroundColor: '#2563A6',
   },
   dayChipText: {
     fontSize: 9,
@@ -1182,15 +1182,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     padding: 10,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
   },
   unassignedBannerText: {
     fontSize: 11,
-    color: '#0369A1',
+    color: '#1C5089',
     fontWeight: '700',
   },
   detailScroll: {

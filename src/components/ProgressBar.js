@@ -77,7 +77,7 @@ const styles = StyleSheet.create({
   waitingText: {
     fontSize: 12,
     fontWeight: '600',
-    color: '#0284C7',
+    color: '#1C5089',
   },
 });
 

@@ -413,7 +413,7 @@ export default function SettingsScreen({ navigation }) {
               <Switch
                 value={maintenanceMode}
                 onValueChange={handleToggleMaintenance}
-                trackColor={{ false: '#D4D4D8', true: '#0EA5E9' }}
+                trackColor={{ false: '#D4D4D8', true: '#2563A6' }}
                 thumbColor={colors.white}
               />
             </View>

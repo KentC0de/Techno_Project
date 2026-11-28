@@ -937,7 +937,7 @@ const styles = StyleSheet.create({
     borderColor: 'rgba(14, 165, 233, 0.25)',
   },
   groupChangeBtn: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderColor: colors.border,
   },
   groupChangeBtnText: {

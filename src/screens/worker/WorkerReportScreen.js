@@ -92,8 +92,8 @@ function getReportStatusMeta(status) {
     case 'reviewed':
       return {
         label: 'Approved',
-        bg: '#0EA5E9',
-        border: '#0EA5E9',
+        bg: '#2563A6',
+        border: '#2563A6',
         text: '#FFFFFF',
       };
     case 'returned':
@@ -778,9 +778,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
     borderRadius: 8,
     paddingTop: 10,
     paddingBottom: 10,

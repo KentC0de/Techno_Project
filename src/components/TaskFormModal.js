@@ -1115,7 +1115,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   chipActive: {
-    backgroundColor: '#0369A1',
+    backgroundColor: '#1C5089',
     borderColor: colors.primary,
   },
   chipText: {
@@ -1146,7 +1146,7 @@ const styles = StyleSheet.create({
     borderColor: '#27272A',
   },
   weekdayChipActive: {
-    backgroundColor: '#0369A1',
+    backgroundColor: '#1C5089',
     borderColor: colors.primary,
   },
   weekdayText: {

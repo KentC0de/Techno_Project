@@ -231,7 +231,7 @@ export default function ResetPasswordScreen({ navigation }) {
             {status === 'success' && (
               <View style={styles.center}>
                 <View style={styles.iconCircleSuccess}>
-                  <Ionicons name="checkmark-circle" size={56} color="#0EA5E9" />
+                  <Ionicons name="checkmark-circle" size={56} color="#2563A6" />
                 </View>
                 <Text style={styles.title}>Password Updated!</Text>
                 {isMobileBrowser ? (
@@ -337,7 +337,7 @@ const styles = StyleSheet.create({
     width: 88,
     height: 88,
     borderRadius: 44,
-    backgroundColor: '#E0F2FE',
+    backgroundColor: '#EAF2FA',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 20,

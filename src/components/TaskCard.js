@@ -187,7 +187,7 @@ export default function TaskCard({
           {/* SUBMITTED STATE BANNER */}
           {isSubmitted && (
             <View style={styles.submittedBanner}>
-              <Ionicons name="time-outline" size={16} color="#0284C7" style={{ marginRight: 6 }} />
+              <Ionicons name="time-outline" size={16} color="#1C5089" style={{ marginRight: 6 }} />
               <Text style={styles.submittedBannerText}>
                 Waiting for admin approval • Submitted by {submitterName}
                 {log?.submitted_at || log?.done_at ? ` at ${formatSimpleTime(log.submitted_at || log.done_at)}` : ''}
@@ -313,8 +313,8 @@ const styles = StyleSheet.create({
     backgroundColor: '#FFFBFB',
   },
   doneCard: {
-    borderColor: '#BAE6FD',
-    backgroundColor: '#F8FAFC',
+    borderColor: '#C9DCF0',
+    backgroundColor: '#F5F7FA',
   },
   rejectedCard: {
     borderColor: '#FCA5A5',
@@ -368,9 +368,9 @@ const styles = StyleSheet.create({
     borderColor: '#F59E0B',
   },
   cameraIconButton: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
   },
   photoCountBadge: {
     position: 'absolute',
@@ -426,7 +426,7 @@ const styles = StyleSheet.create({
   submittedBanner: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 6,
@@ -434,7 +434,7 @@ const styles = StyleSheet.create({
   },
   submittedBannerText: {
     fontSize: 12,
-    color: '#0284C7',
+    color: '#1C5089',
     flex: 1,
   },
   doneBanner: {

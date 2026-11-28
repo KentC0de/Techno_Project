@@ -111,9 +111,9 @@ const styles = StyleSheet.create({
     borderRadius: 16,
   },
   assignedBadge: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
   },
   unassignedBadge: {
     backgroundColor: '#FFFFFF',
@@ -146,7 +146,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   assignedLabel: {
-    color: '#0369A1',
+    color: '#1C5089',
   },
   unassignedLabel: {
     color: colors.primary,

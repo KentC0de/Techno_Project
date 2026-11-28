@@ -461,7 +461,7 @@ const styles = StyleSheet.create({
     width: 64,
     height: 64,
     borderRadius: 32,
-    backgroundColor: '#E0F2FE',
+    backgroundColor: '#EAF2FA',
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 10,
@@ -570,7 +570,7 @@ const styles = StyleSheet.create({
   },
   passwordBox: {
     padding: 14,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderBottomWidth: 1,
     borderBottomColor: colors.borderLight,
     gap: 8,
@@ -602,7 +602,7 @@ const styles = StyleSheet.create({
   },
   activityBox: {
     padding: 12,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderBottomWidth: 1,
     borderBottomColor: colors.borderLight,
   },

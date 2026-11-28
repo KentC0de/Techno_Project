@@ -105,7 +105,7 @@ export default function NotificationBell({ onNavigate }) {
         accessibilityRole="button"
         accessibilityLabel={`Notifications, ${unreadCount} unread`}
       >
-        <Ionicons name="notifications-outline" size={22} color={colors.white} />
+        <Ionicons name="notifications-outline" size={22} color={colors.textSecondary} />
         {unreadCount > 0 && (
           <View style={styles.badge}>
             <Text style={styles.badgeText}>{displayCount}</Text>
@@ -213,7 +213,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 8,
-    backgroundColor: '#1E1E1E',
+    backgroundColor: 'transparent',
     alignItems: 'center',
     justifyContent: 'center',
     position: 'relative',
@@ -230,7 +230,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 4,
     borderWidth: 1.5,
-    borderColor: '#0A0A0A',
+    borderColor: '#FFFFFF',
   },
   badgeText: {
     color: colors.white,
@@ -314,7 +314,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   itemUnread: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   itemIconCol: {
     paddingTop: 2,

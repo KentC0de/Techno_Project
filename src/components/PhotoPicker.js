@@ -164,10 +164,10 @@ const styles = StyleSheet.create({
     gap: 6,
     borderRadius: 10,
     borderWidth: 1,
-    borderColor: '#0EA5E9',
+    borderColor: '#2563A6',
     backgroundColor: '#FFFFFF',
   },
   btnDisabled: { opacity: 0.4 },
-  btnText: { fontSize: 14, fontWeight: '600', color: '#0284C7' },
+  btnText: { fontSize: 14, fontWeight: '600', color: '#1C5089' },
   errorText: { marginTop: 6, fontSize: 13, color: '#DC2626' },
 });

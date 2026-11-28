@@ -25,9 +25,11 @@ import {
   computePerformance,
 } from '../utils/schedule';
 import { computeTaskCounts } from '../utils/taskStatus';
-import { colors } from '../theme';
+import { colors, shell } from '../theme';
 
 const ROUTE_LABELS = {
+  Dashboard: 'Dashboard • Solar PM Hub',
+  Settings: 'Settings • Solar PM Hub',
   AdminCalendar: 'Schedule Calendar • Solar PM Hub',
   ReportsList: 'Reports • Solar PM Hub',
   ReportDetail: 'Report Detail • Solar PM Hub',
@@ -35,6 +37,7 @@ const ROUTE_LABELS = {
   AssignWorkers: 'Assign Workers • Solar PM Hub',
   ManageEquipment: 'Equipment & Systems • Solar PM Hub',
   Performance: 'Performance Report • Solar PM Hub',
+  SiteMap: 'Site Map • Solar PM Hub',
   Users: 'User Roles • Solar PM Hub',
   ActivityLogs: 'Activity Logs • Solar PM Hub',
   WorkerToday: 'Worker View • Solar PM Hub',
@@ -42,7 +45,7 @@ const ROUTE_LABELS = {
 };
 
 const SYSTEMS = [
-  { id: 'A', name: 'A - Inverter Station Area', desc: 'Inverter Station Area', color: '#0EA5E9' },
+  { id: 'A', name: 'A - Inverter Station Area', desc: 'Inverter Station Area', color: '#2563A6' },
   { id: 'B', name: 'B - PV Field Area', desc: 'PV Field Area', color: '#10B981' },
   { id: 'C', name: 'C - MV & LV System', desc: 'MV & LV System', color: '#F59E0B' },
   { id: 'D', name: 'D - Other System', desc: 'Other Systems', color: '#8B5CF6' },
@@ -137,45 +140,38 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
   const currentSystemObj = systemOptions.find((s) => s.id === selectedSystem) || systemOptions[0];
 
   const adminNavItems = [
+    { id: 'dashboard', key: 'Dashboard', section: 'WORKSPACE', label: 'Dashboard', icon: 'grid-outline' },
     {
+      id: 'schedule',
       key: 'AdminCalendar',
-      label: 'Schedule Calendar',
+      label: 'Maintenance Schedule',
       icon: 'calendar-outline',
+    },
+    {
+      id: 'daily-reports',
+      key: 'AdminCalendar',
+      label: 'Daily Reports',
+      icon: 'document-text-outline',
+      navigateParams: { view: 'reports' },
       badge: submittedReportsCount > 0 ? (submittedReportsCount > 99 ? '99+' : submittedReportsCount) : null,
-      badgeColor: '#0EA5E9',
+      badgeColor: shell.accent,
+      noActive: true,
     },
+    { id: 'site-map', key: 'SiteMap', label: 'Site Map', icon: 'map-outline' },
     {
-      key: 'AssignWorkers',
-      label: 'Assign Workers',
-      icon: 'people-circle-outline',
-    },
-    {
-      key: 'ManageEquipment',
-      label: 'Equipment & Systems',
-      icon: 'hardware-chip-outline',
-    },
-    {
+      id: 'history',
       key: 'Performance',
-      label: 'Performance Report',
-      icon: 'stats-chart-outline',
+      label: 'History & Reports',
+      icon: 'time-outline',
       badge: overdueCount > 0 ? overdueCount : null,
       badgeColor: '#EF4444',
     },
-    {
-      key: 'Users',
-      label: 'User Roles',
-      icon: 'people-outline',
-    },
-    {
-      key: 'ActivityLogs',
-      label: 'Activity Logs',
-      icon: 'receipt-outline',
-    },
-    {
-      key: 'WorkerToday',
-      label: 'Worker View',
-      icon: 'phone-portrait-outline',
-    },
+    { id: 'assign', key: 'AssignWorkers', section: 'MANAGEMENT', label: 'Schedule Management', icon: 'people-circle-outline' },
+    { id: 'users', key: 'Users', label: 'Groups & Personnel', icon: 'people-outline' },
+    { id: 'equipment', key: 'ManageEquipment', label: 'Task & Equipment', icon: 'hardware-chip-outline' },
+    { id: 'activity', key: 'ActivityLogs', label: 'Activity Logs', icon: 'receipt-outline' },
+    { id: 'settings', key: 'Settings', label: 'Settings', icon: 'settings-outline' },
+    { id: 'worker-view', key: 'WorkerToday', label: 'Worker View', icon: 'phone-portrait-outline' },
   ];
 
   const workerNavItems = [
@@ -206,16 +202,16 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
       {/* 1. Header / Brand Bar (Pinned Top) */}
       <View style={[styles.brandBox, isCollapsed && styles.brandBoxCollapsed]}>
         <View style={styles.brandIcon}>
-          <Ionicons name="sunny" size={20} color={colors.white} />
+          <Ionicons name="sunny" size={20} color={shell.sidebar} />
         </View>
 
         {!isCollapsed && (
           <View style={styles.brandText}>
             <Text style={styles.brandTitle} numberOfLines={1}>
-              Solar PM
+              KIRAHON
             </Text>
             <Text style={styles.brandSub} numberOfLines={1}>
-              Maintenance Hub
+              Solar Power Plant
             </Text>
           </View>
         )}
@@ -337,17 +333,20 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.navSection}>
-          {!isCollapsed && (
-            <Text style={styles.sectionHeader}>
-              {isAdmin ? 'ADMINISTRATION' : 'MAINTENANCE WORK'}
-            </Text>
+          {!isCollapsed && !isAdmin && (
+            <Text style={styles.sectionHeader}>MAINTENANCE WORK</Text>
           )}
 
           {navItems.map((item) => {
-            const isActive = activeRoute === item.key;
+            const isActive = activeRoute === item.key && !item.noActive;
             return (
+              <React.Fragment key={item.id || item.key}>
+              {item.section && !isCollapsed ? (
+                <Text style={[styles.sectionHeader, item.section === 'MANAGEMENT' && styles.sectionHeaderSpaced]}>
+                  {item.section}
+                </Text>
+              ) : null}
               <TouchableOpacity
-                key={item.key}
                 style={[
                   styles.navItem,
                   isActive && styles.navItemActive,
@@ -360,7 +359,7 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
                   <Ionicons
                     name={item.icon}
                     size={20}
-                    color={isActive ? colors.primary : colors.textMuted}
+                    color={isActive ? shell.accent : shell.sidebarText}
                   />
                   {/* Tiny badge dot in rail mode */}
                   {isCollapsed && item.badge ? (
@@ -391,6 +390,7 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
                   </View>
                 ) : null}
               </TouchableOpacity>
+              </React.Fragment>
             );
           })}
 
@@ -572,9 +572,9 @@ export default function WebSidebar({ activeRoute, onNavigate, onClose }) {
 
 const styles = StyleSheet.create({
   sidebar: {
-    backgroundColor: '#0A0A0A',
+    backgroundColor: shell.sidebar,
     borderRightWidth: 1,
-    borderRightColor: '#171717',
+    borderRightColor: shell.sidebarBorder,
     flexDirection: 'column',
     justifyContent: 'space-between',
     paddingVertical: 16,
@@ -596,7 +596,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 8,
-    backgroundColor: colors.primary,
+    backgroundColor: shell.accent,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -608,7 +608,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '800',
     color: colors.white,
-    letterSpacing: 0.3,
+    letterSpacing: 1.2,
   },
   brandSub: {
     fontSize: 10,
@@ -743,11 +743,17 @@ const styles = StyleSheet.create({
   },
   sectionHeader: {
     fontSize: 10,
-    fontWeight: '800',
-    color: '#52525B',
-    letterSpacing: 1.2,
+    fontWeight: '700',
+    color: shell.sidebarText,
+    letterSpacing: 1.4,
     marginBottom: 8,
     paddingHorizontal: 10,
+  },
+  sectionHeaderSpaced: {
+    marginTop: 16,
+    paddingTop: 16,
+    borderTopWidth: 1,
+    borderTopColor: shell.sidebarBorder,
   },
   navItem: {
     flexDirection: 'row',
@@ -763,9 +769,9 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   navItemActive: {
-    backgroundColor: '#15181E',
+    backgroundColor: shell.sidebarActive,
     borderLeftWidth: 3,
-    borderLeftColor: colors.primary,
+    borderLeftColor: shell.accent,
   },
   navItemIconWrapper: {
     width: 24,
@@ -776,7 +782,7 @@ const styles = StyleSheet.create({
   navLabel: {
     fontSize: 13,
     fontWeight: '600',
-    color: '#94A3B8',
+    color: shell.sidebarText,
     marginLeft: 10,
     flex: 1,
   },

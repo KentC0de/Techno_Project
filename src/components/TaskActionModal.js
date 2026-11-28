@@ -266,15 +266,15 @@ const styles = StyleSheet.create({
   noticeBox: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
     borderRadius: 8,
     padding: 10,
     marginBottom: 16,
   },
   noticeText: {
-    color: '#0284C7',
+    color: '#1C5089',
     fontSize: 12,
     fontWeight: '500',
     flex: 1,

@@ -2,17 +2,17 @@
 // Soft greys for borders and light backgrounds.
 
 export const colors = {
-  primary: '#0EA5E9',         // Sky blue
-  primaryLight: '#38BDF8',    // Light sky blue
-  primaryVeryLight: '#E0F2FE',// Very light sky blue
-  primaryDark: '#0284C7',     // Darker sky blue
+  primary: '#2563A6',         // Sky blue
+  primaryLight: '#5B8FC7',    // Light sky blue
+  primaryVeryLight: '#EAF2FA',// Very light sky blue
+  primaryDark: '#1C5089',     // Darker sky blue
 
-  dark: '#0A0A0A',            // Black for headers, text, dark surfaces
+  dark: '#202B3C',            // Ink for headings and text
   darkSurface: '#171717',     // Dark surface
   darkMuted: '#52525B',       // Muted dark text
 
   white: '#FFFFFF',           // Backgrounds and cards
-  background: '#F8FAFC',      // Crisp light grey/slate background
+  background: '#F5F7FA',      // Crisp light grey/slate background
   cardBg: '#FFFFFF',
 
   border: '#E2E8F0',          // Soft grey border
@@ -20,15 +20,15 @@ export const colors = {
   borderDark: '#0A0A0A',      // Strong black border
 
   // Status highlights within sky blue/black/white & muted accents
-  textPrimary: '#0A0A0A',
+  textPrimary: '#202B3C',
   textSecondary: '#475569',
   textMuted: '#94A3B8',
-  textLight: '#F8FAFC',
+  textLight: '#F5F7FA',
 
-  success: '#0284C7',
-  successLight: '#E0F2FE',
-  warning: '#F59E0B',
-  warningLight: '#FEF3C7',
+  success: '#2E9B64',
+  successLight: '#E8F6EE',
+  warning: '#E8A52B',
+  warningLight: '#FFFBEF',
   danger: '#EF4444',
   dangerLight: '#FEE2E2',
 
@@ -37,16 +37,16 @@ export const colors = {
     d: {
       code: 'D',
       label: 'Daily',
-      bg: '#E0F2FE',        // Very light sky
-      text: '#0369A1',      // Deep sky blue
-      border: '#BAE6FD',
+      bg: '#EAF2FA',        // Very light sky
+      text: '#1C5089',      // Deep sky blue
+      border: '#C9DCF0',
     },
     w: {
       code: 'W',
       label: 'Weekly',
-      bg: '#0EA5E9',        // Primary sky blue
+      bg: '#2563A6',        // Primary sky blue
       text: '#FFFFFF',      // White
-      border: '#0284C7',
+      border: '#1C5089',
     },
     M: {
       code: 'M',
@@ -58,14 +58,14 @@ export const colors = {
     Q: {
       code: 'Q',
       label: 'Quarterly',
-      bg: '#38BDF8',        // Light sky blue
+      bg: '#5B8FC7',        // Light sky blue
       text: '#0A0A0A',      // Black
-      border: '#0EA5E9',
+      border: '#2563A6',
     },
     SA: {
       code: 'SA',
       label: 'Semi-Annual',
-      bg: '#0369A1',        // Deep ocean/sky blue
+      bg: '#1C5089',        // Deep ocean/sky blue
       text: '#FFFFFF',      // White
       border: '#075985',
     },
@@ -74,9 +74,9 @@ export const colors = {
   status: {
     done: {
       label: 'Done',
-      bg: '#E0F2FE',
-      text: '#0369A1',
-      border: '#38BDF8',
+      bg: '#E8F6EE',
+      text: '#166534',
+      border: '#86D3A8',
       icon: 'checkmark-circle',
     },
     issue: {
@@ -95,12 +95,23 @@ export const colors = {
     },
     pending: {
       label: 'Pending',
-      bg: '#FFFFFF',
-      text: '#0A0A0A',
-      border: '#E2E8F0',
+      bg: '#FFFBEF',
+      text: '#92400E',
+      border: '#F4C542',
       icon: 'ellipse-outline',
     },
   },
+};
+
+// Shell palette (sidebar / page chrome) taken from the Solar Maintenance System reference.
+export const shell = {
+  sidebar: '#142D4E',
+  sidebarActive: '#2B4666',
+  sidebarBorder: 'rgba(255,255,255,0.10)',
+  sidebarText: '#CBD5E1',
+  accent: '#F4C542',
+  pageBg: '#F5F7FA',
+  text: '#202B3C',
 };
 
 export const spacing = {

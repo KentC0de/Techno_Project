@@ -264,7 +264,7 @@ const styles = StyleSheet.create({
     marginBottom: 14,
   },
   iconCircleDefault: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   iconCircleDanger: {
     backgroundColor: '#FEF2F2',
@@ -285,7 +285,7 @@ const styles = StyleSheet.create({
   },
   detailsBox: {
     width: '100%',
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderColor: '#E2E8F0',
     borderWidth: 1,
     borderRadius: 10,
@@ -312,7 +312,7 @@ const styles = StyleSheet.create({
   },
   requireInput: {
     width: '100%',
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderColor: '#CBD5E1',
     borderWidth: 1.5,
     borderRadius: 8,

@@ -232,11 +232,11 @@ const styles = StyleSheet.create({
   },
   groupRowSelected: {
     borderColor: colors.primary,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   groupRowInactive: {
     opacity: 0.6,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
   },
   groupRowDisabled: {
     opacity: 0.5,

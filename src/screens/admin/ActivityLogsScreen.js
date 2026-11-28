@@ -751,7 +751,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#FAFAFA',
   },
   logRowExpanded: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
   },
   colTimestamp: {
     minWidth: 120,
@@ -861,7 +861,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   detailsContainer: {
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderTopWidth: 1,
     borderTopColor: colors.borderLight,
     padding: 14,

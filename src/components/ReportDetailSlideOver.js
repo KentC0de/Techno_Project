@@ -730,9 +730,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
     borderWidth: 1,
-    borderColor: '#BAE6FD',
+    borderColor: '#C9DCF0',
     borderRadius: 10,
     padding: 12,
   },
@@ -831,7 +831,7 @@ const styles = StyleSheet.create({
   resultRow: {
     paddingVertical: 10,
     paddingHorizontal: 12,
-    backgroundColor: '#F8FAFC',
+    backgroundColor: '#F5F7FA',
     borderRadius: 8,
     borderWidth: 1,
     borderColor: colors.border,
@@ -897,7 +897,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   issueBadgeResolved: {
-    backgroundColor: '#E0F2FE',
+    backgroundColor: '#EAF2FA',
   },
   issueBadgeUnresolved: {
     backgroundColor: '#FEF3C7',

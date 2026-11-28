@@ -238,7 +238,7 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   itemUnread: {
-    backgroundColor: '#F0F9FF',
+    backgroundColor: '#F5F9FD',
   },
   itemIconCol: {
     paddingTop: 2,

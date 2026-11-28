@@ -69,9 +69,9 @@ function getStatusPill(status) {
     case 'reviewed':
       return {
         label: 'Reviewed',
-        bg: '#E0F2FE',
-        text: '#0284C7',
-        dot: '#0EA5E9',
+        bg: '#EAF2FA',
+        text: '#1C5089',
+        dot: '#2563A6',
       };
     case 'returned':
       return {
@@ -1886,7 +1886,7 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
   },
   weekColHeaderSelected: {
-    backgroundColor: '#E0F2FE',
+    backgroundColor: '#EAF2FA',
   },
   weekColShort: {
     fontSize: 11,
@@ -1963,7 +1963,7 @@ const styles = StyleSheet.create({
     fontWeight: '700',
   },
   segmentBadge: {
-    backgroundColor: '#0EA5E9',
+    backgroundColor: '#2563A6',
     borderRadius: 10,
     paddingHorizontal: 6,
     paddingVertical: 1,
